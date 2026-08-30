@@ -6,17 +6,47 @@
 
 **Local-first observability and tracking for coding-agent work.**
 
+<p align="center">
+  <img src="https://img.shields.io/badge/status-architecture%20%2B%20MVP%20design-4a5568?style=flat-square" alt="Status: architecture and MVP design">
+  <img src="https://img.shields.io/badge/local--first-127.0.0.1%20only-ea7424?style=flat-square" alt="Local-first: loopback only">
+  <img src="https://img.shields.io/badge/AI%20calls-none%20in%20MVP-2f6f63?style=flat-square" alt="No AI calls in the MVP">
+</p>
+
 Crucible is a companion layer for agent-assisted development. It observes a coding agent's work, captures the effective Git state before and after each unit of work, and keeps a local, inspectable history.
 
 > A coding environment should get better the more you use it.
 
 Crucible is not an IDE, coding agent, AI model, prompt proxy, or replacement for [OpenCode](https://opencode.ai/). OpenCode remains the environment where work happens. Crucible records that work and, in later milestones, will use that history for deterministic validation, reviews, correction tracking, learnings, and rules.
 
+> **MVP focus:** trustworthy Git attribution per agent Task. Crucible skips tracking when it cannot establish a safe baseline and boundary.
+
+## Target MVP Stack
+
+The following is the **planned** stack. These components are not implemented in this repository yet.
+
+<p>
+  <img src="https://img.shields.io/badge/OpenCode-V2%20adapter-111827?style=flat-square&logo=typescript&logoColor=3178C6" alt="Planned OpenCode V2 TypeScript adapter">
+  <img src="https://img.shields.io/badge/CLI-TypeScript-111827?style=flat-square&logo=typescript&logoColor=3178C6" alt="Planned TypeScript CLI">
+  <img src="https://img.shields.io/badge/Core-FastAPI-111827?style=flat-square&logo=fastapi&logoColor=009688" alt="Planned FastAPI Core">
+  <img src="https://img.shields.io/badge/Storage-SQLite-111827?style=flat-square&logo=sqlite&logoColor=003B57" alt="Planned SQLite storage">
+  <img src="https://img.shields.io/badge/Dashboard-Angular-111827?style=flat-square&logo=angular&logoColor=DD0031" alt="Planned Angular dashboard">
+  <img src="https://img.shields.io/badge/Workspace-pnpm-111827?style=flat-square&logo=pnpm&logoColor=F69220" alt="Planned pnpm workspace">
+</p>
+
 ## Status
 
 This repository currently contains the architecture and MVP design. The implementation packages, installable CLI, OpenCode adapter, FastAPI Core, and Angular dashboard have not been created yet.
 
 The first implementation milestone is deliberately narrow: reliably track one OpenCode Task, persist its isolated Git diff in local SQLite, and display it read-only in a dashboard. Features described as **Future** are not available in the MVP.
+
+```mermaid
+flowchart LR
+  P[User prompt] --> O[OpenCode]
+  O --> A[Thin adapter]
+  A --> C[Local Core]
+  C --> S[(SQLite)]
+  C --> D[Read-only dashboard]
+```
 
 ## Contents
 
@@ -36,6 +66,17 @@ The first implementation milestone is deliberately narrow: reliably track one Op
 - [MVP Limitations](#mvp-limitations)
 - [Roadmap](#roadmap)
 - [Contributing](#contributing)
+
+## At A Glance
+
+| Boundary | MVP decision |
+| --- | --- |
+| Unit of tracking | One user instruction becomes one Task, not one whole Session. |
+| Source of truth | The Core owns Git snapshots, reconciliation, lifecycle, and SQLite. |
+| Safety rule | One active Task per physical working tree. |
+| Failure behavior | Continue OpenCode; skip telemetry rather than attribute a diff incorrectly. |
+| Data location | Per-user local SQLite, outside observed repositories. |
+| Current maturity | Architecture and MVP design only; no executable packages yet. |
 
 ## What Crucible Tracks
 
