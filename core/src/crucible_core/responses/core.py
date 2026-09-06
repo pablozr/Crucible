@@ -19,6 +19,10 @@ ERROR_MESSAGES = {
     "STEER_WITHOUT_ACTIVE_TASK": (
         "No active task in this session to steer. Start a new request first."
     ),
+    "SESSION_WORKTREE_MISMATCH": (
+        "This session is already linked to another working tree. "
+        "Use the session from its original checkout."
+    ),
 }
 
 VALIDATION_MESSAGE = "Request validation failed."

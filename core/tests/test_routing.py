@@ -307,3 +307,167 @@ def test_queue_delivery_stays_unsupported(monkeypatch, tmp_path):
     assert response.status_code == 400
     assert response.json()["data"]["code"] == "UNSUPPORTED_DELIVERY"
     assert table_count(db_path(tmp_path), "tasks") == 0
+
+
+def test_session_worktree_mismatch_is_409_without_artifacts(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
+    project_id = initialized_repository(tmp_path / "repo-a")
+    repo_b = tmp_path / "repo-b"
+    initialized_repository(repo_b)
+    (repo_b / ".crucible" / "project.json").write_text(
+        json.dumps({"project_id": project_id}), encoding="utf-8"
+    )
+    with TestClient(app) as client:
+        first = client.post(
+            "/v1/events",
+            json=make_event(project_id, tmp_path / "repo-a"),
+        )
+        assert first.status_code == 200
+        trees_before = table_count(db_path(tmp_path), "working_trees")
+        sessions_before = table_count(db_path(tmp_path), "sessions")
+        mismatch_id = str(uuid.uuid4())
+        response = client.post(
+            "/v1/events",
+            json=make_event(
+                project_id,
+                repo_b,
+                session="session-1",
+                input_id="input-1",
+                event_id=mismatch_id,
+            ),
+        )
+    assert response.status_code == 409
+    envelope = response.json()
+    assert envelope["status"] == "error"
+    assert envelope["data"]["code"] == "SESSION_WORKTREE_MISMATCH"
+    assert "working tree" in envelope["message"].lower()
+    assert table_count(db_path(tmp_path), "working_trees") == trees_before
+    assert table_count(db_path(tmp_path), "sessions") == sessions_before
+    assert table_count(db_path(tmp_path), "tasks") == 1
+    assert table_count(db_path(tmp_path), "inputs") == 1
+    connection = sqlite3.connect(db_path(tmp_path))
+    try:
+        event_row = connection.execute(
+            "SELECT COUNT(*) FROM inbound_events WHERE id = ?", (mismatch_id,)
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert event_row == 0
+
+
+def test_finalizing_task_is_not_joinable(monkeypatch, tmp_path):
+    monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
+    project_id = initialized_repository(tmp_path / "repo")
+    with TestClient(app) as client:
+        first = client.post(
+            "/v1/events",
+            json=make_event(project_id, tmp_path / "repo"),
+        ).json()["data"]["event"]
+        connection = sqlite3.connect(db_path(tmp_path))
+        try:
+            connection.execute(
+                "UPDATE tasks SET status = 'finalizing' WHERE id = ?",
+                (first["task_id"],),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        monkeypatch.setattr(
+            admissions_service,
+            "_capture_baseline",
+            lambda *a, **k: (_ for _ in ()).throw(
+                AssertionError("no capture")
+            ),
+        )
+        same_session_new = client.post(
+            "/v1/events",
+            json=make_event(
+                project_id,
+                tmp_path / "repo",
+                delivery="new",
+                input_id="input-2",
+            ),
+        )
+        steered = client.post(
+            "/v1/events",
+            json=make_event(
+                project_id,
+                tmp_path / "repo",
+                delivery="steer",
+                input_id="input-steer",
+            ),
+        )
+    assert same_session_new.status_code == 200
+    assert same_session_new.json()["data"]["event"]["outcome"] == (
+        "released_overlap"
+    )
+    assert steered.status_code == 409
+    assert steered.json()["data"]["code"] == "STEER_WITHOUT_ACTIVE_TASK"
+    assert table_count(db_path(tmp_path), "tasks") == 1
+    assert table_count(db_path(tmp_path), "inputs") == 1
+
+
+def test_race_after_capture_reroutes_to_overlap(monkeypatch, tmp_path):
+    monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
+    project_id = initialized_repository(tmp_path / "repo")
+
+    def _insert_competing_task(database_path, event, candidate_id):
+        connection = sqlite3.connect(database_path)
+        try:
+            tree_id = connection.execute(
+                "SELECT id FROM working_trees LIMIT 1"
+            ).fetchone()[0]
+            connection.execute(
+                "INSERT INTO sessions (id, working_tree_id, adapter, "
+                "agent_session_id, adapter_version, workspace_path) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    str(uuid.uuid4()),
+                    tree_id,
+                    "test-adapter",
+                    "session-competitor",
+                    "1.0",
+                    str(tmp_path / "repo"),
+                ),
+            )
+            competitor_session = connection.execute(
+                "SELECT id FROM sessions WHERE agent_session_id = ?",
+                ("session-competitor",),
+            ).fetchone()[0]
+            connection.execute(
+                "INSERT INTO tasks (id, session_id, working_tree_id, "
+                "status, started_at) VALUES (?, ?, ?, 'running', ?)",
+                (
+                    str(uuid.uuid4()),
+                    competitor_session,
+                    tree_id,
+                    "2026-09-06T00:00:00Z",
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+    monkeypatch.setattr(
+        admissions_service, "_RACE_HOOK", _insert_competing_task
+    )
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/events",
+                json=make_event(
+                    project_id,
+                    tmp_path / "repo",
+                    session="session-late",
+                    input_id="input-late",
+                ),
+            )
+    finally:
+        monkeypatch.setattr(admissions_service, "_RACE_HOOK", None)
+    assert response.status_code == 200
+    body = response.json()["data"]["event"]
+    assert body["outcome"] == "released_overlap"
+    assert table_count(db_path(tmp_path), "tasks") == 1
+    assert table_count(db_path(tmp_path), "inputs") == 0

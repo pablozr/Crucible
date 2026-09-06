@@ -163,6 +163,17 @@ def mark_event_accepted(
     )
 
 
+def mark_event_accepted_overlap(
+    connection: sqlite3.Connection, event_id: str
+) -> None:
+    connection.execute(
+        "UPDATE inbound_events SET status = 'accepted', "
+        "outcome = 'released_overlap', input_id = NULL, task_id = NULL "
+        "WHERE id = ?",
+        (event_id,),
+    )
+
+
 def mark_event_rejected(
     connection: sqlite3.Connection, event_id: str, code: str
 ) -> None:

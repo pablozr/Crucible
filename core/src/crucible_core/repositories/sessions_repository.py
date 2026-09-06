@@ -45,6 +45,20 @@ def find_session_id(
     return row[0] if row else None
 
 
+def find_session_tree(
+    connection: sqlite3.Connection, adapter: str, agent_session_id: str
+) -> tuple[str, str] | None:
+    row = connection.execute(
+        "SELECT id, working_tree_id FROM sessions "
+        "WHERE adapter = ? AND agent_session_id = ?",
+        (adapter, agent_session_id),
+    ).fetchone()
+    if row is None:
+        return None
+    session_id, tree_id = row
+    return str(session_id), str(tree_id)
+
+
 def insert_session(
     connection: sqlite3.Connection,
     session_id: str,

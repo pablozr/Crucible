@@ -33,6 +33,40 @@ def find_active_task_by_session(
     return row[0] if row else None
 
 
+def find_running_task_by_session(
+    connection: sqlite3.Connection, session_id: str
+) -> str | None:
+    row = connection.execute(
+        "SELECT id FROM tasks WHERE session_id = ? "
+        "AND status = 'running' "
+        "ORDER BY started_at DESC, id DESC LIMIT 1",
+        (session_id,),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def get_task_status(
+    connection: sqlite3.Connection, task_id: str
+) -> str | None:
+    row = connection.execute(
+        "SELECT status FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    return row[0] if row else None
+
+
+def get_task_owner(
+    connection: sqlite3.Connection, task_id: str
+) -> tuple[str, str, str] | None:
+    row = connection.execute(
+        "SELECT session_id, working_tree_id, status FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    session_id, tree_id, status = row
+    return str(session_id), str(tree_id), str(status)
+
+
 def find_active_task_by_tree(
     connection: sqlite3.Connection, tree_id: str
 ) -> ActiveTaskRef | None:
