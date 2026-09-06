@@ -27,6 +27,7 @@ export function toDispatchContext(admission: Admission): DispatchContext {
       eventId: admission.eventId,
     };
   }
+
   return {
     tracked: false as const,
     outcome: admission.outcome,
@@ -69,6 +70,7 @@ export async function runTrackedDispatch<T>(
       errorCode(error, "UNINITIALIZED_PROJECT"),
       plan.eventId,
     );
+
     const dispatchResult = await dependencies.dispatch(context);
     return { ...context, dispatchResult };
   }

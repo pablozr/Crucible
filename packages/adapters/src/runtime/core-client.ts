@@ -49,10 +49,12 @@ function asEventAdmission(
   if (!isRecord(body) || body["status"] !== "ok" || !isRecord(body["data"])) {
     return undefined;
   }
+
   const data = body["data"] as Record<string, unknown>;
   if (!isRecord(data["event"])) {
     return undefined;
   }
+
   const event = data["event"] as Record<string, unknown>;
   if (
     typeof event["outcome"] !== "string" ||
@@ -60,6 +62,7 @@ function asEventAdmission(
   ) {
     return undefined;
   }
+
   const outcome = event["outcome"] as string;
   const taskId =
     typeof event["task_id"] === "string" ? (event["task_id"] as string) : null;
@@ -67,9 +70,11 @@ function asEventAdmission(
     typeof event["input_id"] === "string"
       ? (event["input_id"] as string)
       : null;
+
   if (outcome === "admitted" && event["dispatch_authorized"] === true) {
     return { tracked: true, outcome, taskId, inputId, eventId };
   }
+
   return {
     tracked: false,
     outcome,
@@ -89,6 +94,7 @@ function asErrorAdmission(body: unknown, eventId: string): Admission | undefined
   ) {
     return undefined;
   }
+
   const code = body["data"]["code"] as string;
   return {
     tracked: false,
@@ -117,9 +123,11 @@ export async function postInputCandidate(
   const fetchImpl = options.fetchImpl;
 
   const payload: Record<string, unknown> = { delivery: input.delivery };
+
   if (input.prompt !== undefined) {
     payload["prompt"] = input.prompt;
   }
+
   if (input.model !== undefined) {
     payload["model"] = input.model;
   }
@@ -142,6 +150,7 @@ export async function postInputCandidate(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   let response: Response;
+
   try {
     response = await fetchImpl(`${coreUrl}/v1/events`, {
       method: "POST",
@@ -163,6 +172,7 @@ export async function postInputCandidate(
   }
 
   let parsed: unknown;
+
   try {
     parsed = await response.json();
   } catch {
@@ -178,6 +188,7 @@ export async function postInputCandidate(
 
   if (response.ok) {
     const admission = asEventAdmission(parsed, eventId);
+
     if (!admission) {
       return {
         tracked: false,
@@ -188,10 +199,12 @@ export async function postInputCandidate(
         eventId,
       };
     }
+
     return admission;
   }
 
   const errorAdmission = asErrorAdmission(parsed, eventId);
+
   if (!errorAdmission) {
     return {
       tracked: false,
@@ -202,5 +215,6 @@ export async function postInputCandidate(
       eventId,
     };
   }
+
   return errorAdmission;
 }

@@ -32,14 +32,18 @@ export function resolveProject(workspacePath: string): ResolvedProject {
   if (!isAbsolute(workspacePath)) {
     throw new Error("PATH_MUST_BE_ABSOLUTE: workspacePath must be absolute.");
   }
+
   const root = gitRoot(workspacePath);
   const projectPath = resolve(root, ".crucible", "project.json");
+
   if (!existsSync(projectPath)) {
     throw new Error(
       "UNINITIALIZED_PROJECT: .crucible/project.json not found.",
     );
   }
+
   let parsed: unknown;
+
   try {
     parsed = JSON.parse(readFileSync(projectPath, "utf8"));
   } catch {
@@ -47,6 +51,7 @@ export function resolveProject(workspacePath: string): ResolvedProject {
       "INVALID_PROJECT_METADATA: project.json must contain valid JSON.",
     );
   }
+
   if (
     !parsed ||
     typeof parsed !== "object" ||
@@ -58,5 +63,6 @@ export function resolveProject(workspacePath: string): ResolvedProject {
       "INVALID_PROJECT_METADATA: project.json must contain only a valid project_id UUID.",
     );
   }
+
   return { projectId: (parsed as { project_id: string }).project_id, gitRoot: root };
 }

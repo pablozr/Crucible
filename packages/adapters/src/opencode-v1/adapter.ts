@@ -38,12 +38,15 @@ export async function dispatchOpenCodeV1<T>(
   const resolveProject = testing.resolveProject ?? defaultResolveProject;
   const eventId = testing.eventId ?? request.messageId;
 
+  // Compatibility failures must not block the host dispatch.
   if (request.openCodeVersion !== SUPPORTED_OPENCODE_VERSION) {
     const context = skippedContext("INCOMPATIBLE_OPENCODE", eventId);
+
     const dispatchResult = await dependencies.dispatch(context);
     return { ...context, dispatchResult };
   }
 
+  // Invalid adapter input is also fail-open and must not reach the Core.
   if (
     !request.agentSessionId ||
     !request.messageId ||
@@ -55,35 +58,41 @@ export async function dispatchOpenCodeV1<T>(
       ? "PATH_MUST_BE_ABSOLUTE"
       : "INVALID_DISPATCH_REQUEST";
     const context = skippedContext(diagnostic, eventId);
+
     const dispatchResult = await dependencies.dispatch(context);
     return { ...context, dispatchResult };
   }
+
+  // Translate OpenCode's input into the host-neutral tracking workflow.
+  const coreOptions = {
+    fetchImpl,
+    coreUrl: options.coreUrl,
+    timeoutMs: options.timeoutMs,
+    eventId: testing.eventId,
+    adapter: ADAPTER,
+    adapterVersion: options.adapterVersion ?? ADAPTER_VERSION,
+  };
+
+  const postCandidate = (project: { projectId: string; gitRoot: string }) => {
+    const candidate = {
+      agentSessionId: request.agentSessionId,
+      messageId: request.messageId,
+      workspacePath: request.workspacePath,
+      gitRoot: project.gitRoot,
+      projectId: project.projectId,
+      delivery: request.delivery,
+      prompt: request.prompt,
+      model: request.model,
+    };
+
+    return postInputCandidate(candidate, coreOptions);
+  };
 
   return runTrackedDispatch(
     {
       eventId,
       resolveProject: () => resolveProject(request.workspacePath),
-      postCandidate: (project) =>
-        postInputCandidate(
-          {
-            agentSessionId: request.agentSessionId,
-            messageId: request.messageId,
-            workspacePath: request.workspacePath,
-            gitRoot: project.gitRoot,
-            projectId: project.projectId,
-            delivery: request.delivery,
-            prompt: request.prompt,
-            model: request.model,
-          },
-          {
-            fetchImpl,
-            coreUrl: options.coreUrl,
-            timeoutMs: options.timeoutMs,
-            eventId: testing.eventId,
-            adapter: ADAPTER,
-            adapterVersion: options.adapterVersion ?? ADAPTER_VERSION,
-          },
-        ),
+      postCandidate,
     },
     dependencies,
   );
