@@ -6,8 +6,12 @@ import json
 from pathlib import Path
 from typing import Any
 
+from crucible_core.application.admissions import (
+    AdmissionCoordinator,
+)
 from crucible_core.core.database import connect
 from crucible_core.core.errors import AdmissionError
+from crucible_core.infrastructure.git.baseline_capture import capture_baseline
 from crucible_core.logging import get_logger
 from crucible_core.repositories import admissions_repository as admissions_repo
 from crucible_core.repositories import tasks_repository as tasks_repo
@@ -17,14 +21,10 @@ from crucible_core.responses.admissions import (
     task_summary,
 )
 from crucible_core.schemas.admissions import EventRequest
-from crucible_core.services.admission_lifecycle import (
-    AdmissionLifecycle,
-)
-from crucible_core.services.baseline_capture import capture_baseline
 
 __all__ = [
     "AdmissionError",
-    "AdmissionLifecycle",
+    "AdmissionCoordinator",
     "admit_event",
     "get_event",
     "get_task",
@@ -43,7 +43,7 @@ _RACE_HOOK: Any = None
 
 
 def admit_event(database_path: Path, event: EventRequest) -> dict[str, object]:
-    lifecycle = AdmissionLifecycle(
+    lifecycle = AdmissionCoordinator(
         database_path,
         capture_baseline=_capture_baseline,
         race_hook=_RACE_HOOK,
@@ -52,7 +52,7 @@ def admit_event(database_path: Path, event: EventRequest) -> dict[str, object]:
 
 
 def reconcile_incomplete_admissions(database_path: Path) -> None:
-    lifecycle = AdmissionLifecycle(
+    lifecycle = AdmissionCoordinator(
         database_path,
         capture_baseline=_capture_baseline,
         race_hook=_RACE_HOOK,

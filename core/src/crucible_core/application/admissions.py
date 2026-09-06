@@ -45,7 +45,7 @@ _MAX_ROUTE_ATTEMPTS = 3
 _CANDIDATE_REROUTE_CODE = "CANDIDATE_SUPERSEDED"
 
 
-class AdmissionLifecycle:
+class AdmissionCoordinator:
     def __init__(
         self,
         database_path: Path,
