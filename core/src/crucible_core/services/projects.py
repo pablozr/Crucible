@@ -7,7 +7,10 @@ from pathlib import Path
 
 import yaml
 
+from crucible_core.logging import get_logger
 from crucible_core.schemas.projects import Project
+
+logger = get_logger(__name__)
 
 
 class ProjectError(ValueError):
@@ -25,6 +28,7 @@ def resolve_project(directory: Path) -> Project:
             ).stdout.strip()
         ).resolve()
     except subprocess.CalledProcessError as error:
+        logger.warning("project resolution failed code=NOT_A_GIT_REPOSITORY")
         raise ProjectError("NOT_A_GIT_REPOSITORY") from error
 
     crucible_directory = root / ".crucible"
@@ -46,6 +50,7 @@ def resolve_project(directory: Path) -> Project:
 
         uuid.UUID(project_id)
     except (ValueError, KeyError, json.JSONDecodeError) as error:
+        logger.warning("project metadata failed code=INVALID_PROJECT_METADATA")
         raise ProjectError("INVALID_PROJECT_METADATA") from error
 
     limit = 1_048_576
@@ -55,6 +60,7 @@ def resolve_project(directory: Path) -> Project:
         try:
             config = yaml.safe_load(config_file.read_text(encoding="utf-8"))
         except yaml.YAMLError as error:
+            logger.warning("project config failed code=INVALID_PROJECT_CONFIG")
             raise ProjectError("INVALID_PROJECT_CONFIG") from error
 
         if not isinstance(config, dict) or config.get("version") != 1:
