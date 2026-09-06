@@ -38,7 +38,6 @@ export async function dispatchOpenCodeV1<T>(
   const resolveProject = testing.resolveProject ?? defaultResolveProject;
   const eventId = testing.eventId ?? request.messageId;
 
-  // Compatibility failures must not block the host dispatch.
   if (request.openCodeVersion !== SUPPORTED_OPENCODE_VERSION) {
     const context = skippedContext("INCOMPATIBLE_OPENCODE", eventId);
 
@@ -46,7 +45,6 @@ export async function dispatchOpenCodeV1<T>(
     return { ...context, dispatchResult };
   }
 
-  // Invalid adapter input is also fail-open and must not reach the Core.
   if (
     !request.agentSessionId ||
     !request.messageId ||
@@ -63,12 +61,11 @@ export async function dispatchOpenCodeV1<T>(
     return { ...context, dispatchResult };
   }
 
-  // Translate OpenCode's input into the host-neutral tracking workflow.
   const coreOptions = {
     fetchImpl,
     coreUrl: options.coreUrl,
     timeoutMs: options.timeoutMs,
-    eventId: testing.eventId,
+    eventId,
     adapter: ADAPTER,
     adapterVersion: options.adapterVersion ?? ADAPTER_VERSION,
   };

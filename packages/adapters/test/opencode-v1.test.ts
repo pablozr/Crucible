@@ -127,6 +127,7 @@ test("valid admitted Core result is tracked and posts input_candidate once", asy
   assert.equal(result.tracked, true);
   assert.equal(result.outcome, "admitted");
   assert.equal(result.taskId, "task-1");
+  assert.equal(result.eventId, "evt-1");
   const sent = lastBody() as Record<string, unknown>;
   assert.equal(sent["event_type"], "input_candidate");
   assert.equal(sent["event_id"], "evt-1");
