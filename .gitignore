@@ -1,1 +1,35 @@
+# Local documentation
 docs/
+
+# Node.js
+node_modules/
+packages/*/dist/
+coverage/
+.npm/
+.pnpm-store/
+
+# Python
+core/.venv/
+core/.pytest_cache/
+core/.ruff_cache/
+__pycache__/
+*.py[cod]
+*.egg-info/
+**/build/
+*.whl
+
+# Local Crucible data and SQLite sidecars
+*.db
+*.sqlite
+*.sqlite3
+*-wal
+*-shm
+
+# Environment and editor files
+.env
+.env.*
+!.env.example
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
