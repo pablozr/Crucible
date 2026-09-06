@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import sqlite3
 
+from crucible_core.schemas.persistence import SessionTreeRef
+
 
 def get_working_tree_id(
     connection: sqlite3.Connection, git_root: str
@@ -47,7 +49,7 @@ def find_session_id(
 
 def find_session_tree(
     connection: sqlite3.Connection, adapter: str, agent_session_id: str
-) -> tuple[str, str] | None:
+) -> SessionTreeRef | None:
     row = connection.execute(
         "SELECT id, working_tree_id FROM sessions "
         "WHERE adapter = ? AND agent_session_id = ?",
@@ -56,7 +58,7 @@ def find_session_tree(
     if row is None:
         return None
     session_id, tree_id = row
-    return str(session_id), str(tree_id)
+    return SessionTreeRef(session_id=str(session_id), tree_id=str(tree_id))
 
 
 def insert_session(

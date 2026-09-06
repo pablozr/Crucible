@@ -68,8 +68,7 @@ class AdmissionLifecycle:
         )
         if found is None:
             return
-        _, session_tree_id = found
-        if tree_id is None or session_tree_id != tree_id:
+        if tree_id is None or found.tree_id != tree_id:
             raise AdmissionError("SESSION_WORKTREE_MISMATCH", 409)
 
     def admit(self, event: EventRequest) -> dict[str, object]:
@@ -104,7 +103,7 @@ class AdmissionLifecycle:
                 session_row = sessions_repo.find_session_tree(
                     connection, event.adapter, event.agent_session_id
                 )
-                session_id = session_row[0] if session_row else None
+                session_id = session_row.session_id if session_row else None
                 joinable = (
                     tasks_repo.find_running_task_by_session(
                         connection, session_id
@@ -353,9 +352,9 @@ class AdmissionLifecycle:
                         owner = tasks_repo.get_task_owner(connection, joinable)
                         if (
                             owner is not None
-                            and owner[0] == session_id
-                            and owner[1] == tree_id
-                            and owner[2] == "running"
+                            and owner.session_id == session_id
+                            and owner.tree_id == tree_id
+                            and owner.status == "running"
                         ):
                             return self._join_active_task(
                                 event,
@@ -647,10 +646,9 @@ class AdmissionLifecycle:
             connection, event.adapter, event.agent_session_id
         )
         if found is not None:
-            _, session_tree_id = found
-            if tree_id is None or session_tree_id != tree_id:
+            if tree_id is None or found.tree_id != tree_id:
                 raise AdmissionError("SESSION_WORKTREE_MISMATCH", 409)
-            return found[0], session_tree_id
+            return found.session_id, found.tree_id
         if tree_id is None:
             tree_id = str(uuid.uuid4())
             sessions_repo.upsert_project(connection, project_id, git_root)
@@ -715,7 +713,7 @@ class AdmissionLifecycle:
                         deadline,
                         depth + 1,
                     )
-                session_id, _ = session_row
+                session_id = session_row.session_id
                 stored_input = tasks_repo.find_input(
                     connection, session_id, event.input_id
                 )
@@ -778,9 +776,9 @@ class AdmissionLifecycle:
                 owner = tasks_repo.get_task_owner(connection, fresh)
                 if (
                     owner is None
-                    or owner[0] != session_id
-                    or owner[1] != tree_id
-                    or owner[2] != "running"
+                    or owner.session_id != session_id
+                    or owner.tree_id != tree_id
+                    or owner.status != "running"
                 ):
                     connection.rollback()
                     return self._route_without_joinable(
@@ -921,7 +919,7 @@ class AdmissionLifecycle:
         found = sessions_repo.find_session_tree(
             connection, event.adapter, event.agent_session_id
         )
-        return found[0] if found else ""
+        return found.session_id if found else ""
 
     def _reroute_after_race_locked(
         self,
@@ -935,9 +933,9 @@ class AdmissionLifecycle:
             owner = tasks_repo.get_task_owner(connection, fresh)
             if (
                 owner is not None
-                and owner[0] == session_id
-                and owner[1] == tree_id
-                and owner[2] == "running"
+                and owner.session_id == session_id
+                and owner.tree_id == tree_id
+                and owner.status == "running"
             ):
                 return ("join", fresh)
         blocking = tasks_repo.find_active_task_by_tree(connection, tree_id)
@@ -992,7 +990,9 @@ class AdmissionLifecycle:
             found = sessions_repo.find_session_tree(
                 connection, event.adapter, event.agent_session_id
             )
-            if found is not None and (tree_id is None or found[1] != tree_id):
+            if found is not None and (
+                tree_id is None or found.tree_id != tree_id
+            ):
                 connection.rollback()
                 raise AdmissionError("SESSION_WORKTREE_MISMATCH", 409)
             replayed = self._replay_semantic_locked(
@@ -1384,15 +1384,15 @@ class AdmissionLifecycle:
             )
             if session_row is not None and tree_id is not None:
                 joinable = tasks_repo.find_running_task_by_session(
-                    connection, session_row[0]
+                    connection, session_row.session_id
                 )
                 if joinable is not None:
                     owner = tasks_repo.get_task_owner(connection, joinable)
                     if (
                         owner is not None
-                        and owner[0] == session_row[0]
-                        and owner[1] == tree_id
-                        and owner[2] == "running"
+                        and owner.session_id == session_row.session_id
+                        and owner.tree_id == tree_id
+                        and owner.status == "running"
                     ):
                         connection.rollback()
                         return self._join_active_task(

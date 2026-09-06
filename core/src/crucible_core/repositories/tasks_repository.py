@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import sqlite3
 
-from pydantic import BaseModel
-
 from crucible_core.schemas.persistence import (
+    ActiveTaskRef,
     BaselineFileRow,
     InputRef,
     NewStoredInput,
@@ -12,13 +11,9 @@ from crucible_core.schemas.persistence import (
     StoredInput,
     TaskDetailRow,
     TaskInputLink,
+    TaskOwnerRef,
     TaskPageRow,
 )
-
-
-class ActiveTaskRef(BaseModel):
-    id: str
-    session_id: str
 
 
 def find_active_task_by_session(
@@ -56,7 +51,7 @@ def get_task_status(
 
 def get_task_owner(
     connection: sqlite3.Connection, task_id: str
-) -> tuple[str, str, str] | None:
+) -> TaskOwnerRef | None:
     row = connection.execute(
         "SELECT session_id, working_tree_id, status FROM tasks WHERE id = ?",
         (task_id,),
@@ -64,7 +59,11 @@ def get_task_owner(
     if row is None:
         return None
     session_id, tree_id, status = row
-    return str(session_id), str(tree_id), str(status)
+    return TaskOwnerRef(
+        session_id=str(session_id),
+        tree_id=str(tree_id),
+        status=str(status),
+    )
 
 
 def find_active_task_by_tree(

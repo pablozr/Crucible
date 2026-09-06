@@ -39,6 +39,22 @@ class CandidateRef(BaseModel):
     candidate_id: str
 
 
+class SessionTreeRef(BaseModel):
+    session_id: str
+    tree_id: str
+
+
+class ActiveTaskRef(BaseModel):
+    id: str
+    session_id: str
+
+
+class TaskOwnerRef(BaseModel):
+    session_id: str
+    tree_id: str
+    status: str
+
+
 class BaselineFileRow(BaseModel):
     path: str
     status: str
