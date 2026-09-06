@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from crucible_core.core.database import connect
-from crucible_core.core.errors import AdmissionError
+from crucible_core.core.errors import AdmissionError, ProjectError
 from crucible_core.logging import get_logger
 from crucible_core.repositories import admissions_repository as admissions_repo
 from crucible_core.repositories import sessions_repository as sessions_repo
@@ -30,7 +30,7 @@ from crucible_core.schemas.persistence import (
     StoredInput,
 )
 from crucible_core.schemas.projects import Project
-from crucible_core.services.projects import ProjectError, resolve_project
+from crucible_core.services.projects import resolve_project
 from crucible_core.utils.functions import (
     canonical_json_sha256,
     utc_now_iso,

@@ -7,14 +7,11 @@ from pathlib import Path
 
 import yaml
 
+from crucible_core.core.errors import ProjectError
 from crucible_core.logging import get_logger
 from crucible_core.schemas.projects import Project
 
 logger = get_logger(__name__)
-
-
-class ProjectError(ValueError):
-    pass
 
 
 def resolve_project(directory: Path) -> Project:

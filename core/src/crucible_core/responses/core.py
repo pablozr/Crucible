@@ -5,6 +5,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from crucible_core.core.errors import ProblemError
 from crucible_core.logging import get_logger
 from crucible_core.schemas.envelope import ErrorData, ErrorEnvelope
 
@@ -30,12 +31,6 @@ NOT_FOUND_MESSAGE = "API route not found."
 METHOD_NOT_ALLOWED_MESSAGE = "API method not allowed."
 UNEXPECTED_MESSAGE = "Unexpected server error."
 DEFAULT_ERROR_MESSAGE = "Request failed."
-
-
-class ProblemError(Exception):
-    def __init__(self, code: str, status_code: int) -> None:
-        self.code = code
-        self.status_code = status_code
 
 
 def _error_envelope(message: str, code: str) -> dict[str, object]:

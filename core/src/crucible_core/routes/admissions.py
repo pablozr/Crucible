@@ -4,8 +4,8 @@ from uuid import UUID
 
 from fastapi import APIRouter, Query, Request
 
+from crucible_core.core.errors import ProblemError
 from crucible_core.logging import get_logger
-from crucible_core.responses.core import ProblemError
 from crucible_core.schemas.admissions import (
     EventDetail,
     EventRequest,
