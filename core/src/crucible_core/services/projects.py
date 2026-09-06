@@ -28,34 +28,46 @@ def resolve_project(directory: Path) -> Project:
         raise ProjectError("NOT_A_GIT_REPOSITORY") from error
 
     crucible_directory = root / ".crucible"
+
     if crucible_directory.is_symlink():
         raise ProjectError("INVALID_PROJECT_METADATA")
+
     project_file = crucible_directory / "project.json"
+
     if not project_file.is_file():
         raise ProjectError("PROJECT_NOT_INITIALIZED")
+
     try:
         metadata = json.loads(project_file.read_text(encoding="utf-8"))
         project_id = metadata["project_id"]
+
         if set(metadata) != {"project_id"} or not isinstance(project_id, str):
             raise ValueError
+
         uuid.UUID(project_id)
     except (ValueError, KeyError, json.JSONDecodeError) as error:
         raise ProjectError("INVALID_PROJECT_METADATA") from error
 
     limit = 1_048_576
     config_file = crucible_directory / "config.yaml"
+
     if config_file.is_file():
         try:
             config = yaml.safe_load(config_file.read_text(encoding="utf-8"))
         except yaml.YAMLError as error:
             raise ProjectError("INVALID_PROJECT_CONFIG") from error
+
         if not isinstance(config, dict) or config.get("version") != 1:
             raise ProjectError("INVALID_PROJECT_CONFIG")
+
         tracking = config.get("tracking", {})
+
         if not isinstance(tracking, dict):
             raise ProjectError("INVALID_PROJECT_CONFIG")
+
         if "max_snapshot_file_size_bytes" in tracking:
             limit = tracking["max_snapshot_file_size_bytes"]
+
             if (
                 not isinstance(limit, int)
                 or isinstance(limit, bool)

@@ -17,6 +17,5 @@ def health() -> HealthResponse:
 
 @router.get("/status", response_model=OperationalStatusResponse)
 def status(request: Request) -> OperationalStatusResponse:
-    return OperationalStatusResponse.model_validate(
-        operational_status(request.app.state.settings)
-    )
+    status = operational_status(request.app.state.settings)
+    return OperationalStatusResponse.model_validate(status)

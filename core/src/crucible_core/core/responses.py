@@ -13,6 +13,7 @@ async def api_error(
         405,
     }:
         is_not_found = exception.status_code == 404
+
         return JSONResponse(
             status_code=exception.status_code,
             media_type="application/problem+json",
@@ -33,6 +34,7 @@ async def api_error(
                 else "API_METHOD_NOT_ALLOWED",
             },
         )
+
     return JSONResponse(
         status_code=exception.status_code, content={"detail": exception.detail}
     )
