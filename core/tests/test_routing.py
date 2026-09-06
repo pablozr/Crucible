@@ -471,3 +471,84 @@ def test_race_after_capture_reroutes_to_overlap(monkeypatch, tmp_path):
     assert body["outcome"] == "released_overlap"
     assert table_count(db_path(tmp_path), "tasks") == 1
     assert table_count(db_path(tmp_path), "inputs") == 0
+
+
+def test_steer_race_joins_new_task(monkeypatch, tmp_path):
+    monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
+    project_id = initialized_repository(tmp_path / "repo")
+    with TestClient(app) as client:
+        first = client.post(
+            "/v1/events",
+            json=make_event(project_id, tmp_path / "repo"),
+        ).json()["data"]["event"]
+        connection = sqlite3.connect(db_path(tmp_path))
+        try:
+            connection.execute(
+                "UPDATE tasks SET status = 'completed' WHERE id = ?",
+                (first["task_id"],),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        race_task_id = {"id": None}
+
+        def _insert_race_task(database_path, event, candidate_id):
+            connection = sqlite3.connect(database_path)
+            try:
+                tree_id = connection.execute(
+                    "SELECT id FROM working_trees LIMIT 1"
+                ).fetchone()[0]
+                session_id = str(uuid.uuid4())
+                connection.execute(
+                    "INSERT INTO sessions (id, working_tree_id, "
+                    "adapter, agent_session_id, adapter_version, "
+                    "workspace_path) VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        session_id,
+                        tree_id,
+                        "test-adapter",
+                        "session-race",
+                        "1.0",
+                        str(tmp_path / "repo"),
+                    ),
+                )
+                task_id = str(uuid.uuid4())
+                race_task_id["id"] = task_id
+                connection.execute(
+                    "INSERT INTO tasks (id, session_id, "
+                    "working_tree_id, status, started_at) "
+                    "VALUES (?, ?, ?, 'running', ?)",
+                    (
+                        task_id,
+                        session_id,
+                        tree_id,
+                        "2026-09-06T00:00:00Z",
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+        monkeypatch.setattr(
+            admissions_service, "_RACE_HOOK", _insert_race_task
+        )
+        try:
+            response = client.post(
+                "/v1/events",
+                json=make_event(
+                    project_id,
+                    tmp_path / "repo",
+                    delivery="steer",
+                    session="session-race",
+                    input_id="input-steer-race",
+                ),
+            )
+        finally:
+            monkeypatch.setattr(admissions_service, "_RACE_HOOK", None)
+    assert response.status_code == 200
+    body = response.json()["data"]["event"]
+    assert body["status"] == "accepted"
+    assert body["outcome"] == "admitted"
+    assert body["task_id"] == race_task_id["id"]
+    assert table_count(db_path(tmp_path), "tasks") == 2
+    assert table_count(db_path(tmp_path), "inputs") == 2
