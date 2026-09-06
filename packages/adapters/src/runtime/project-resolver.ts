@@ -2,7 +2,14 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 
-import type { ResolvedProject } from "./types.js";
+export type ResolvedProject = {
+  projectId: string;
+  gitRoot: string;
+};
+
+export type ResolveProjectFn = (
+  workspacePath: string,
+) => ResolvedProject | Promise<ResolvedProject>;
 
 const uuidPattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;

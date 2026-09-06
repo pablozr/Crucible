@@ -5,6 +5,16 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./opencode-v1": {
+      "types": "./dist/opencode-v1/index.d.ts",
+      "default": "./dist/opencode-v1/index.js"
+    }
+  },
   "scripts": {
     "build": "tsc --project tsconfig.build.json",
     "test": "tsx --test test/**/*.test.ts",

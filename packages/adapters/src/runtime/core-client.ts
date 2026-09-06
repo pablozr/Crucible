@@ -1,13 +1,14 @@
 import { randomUUID } from "node:crypto";
 
-import {
-  ADAPTER,
-  ADAPTER_VERSION,
-  DEFAULT_CORE_URL,
-  DEFAULT_TIMEOUT_MS,
-  type Delivery,
-  type FetchImpl,
-} from "./types.js";
+import type { Delivery } from "../contracts.js";
+
+export const DEFAULT_CORE_URL = "http://127.0.0.1:7331";
+export const DEFAULT_TIMEOUT_MS = 2000;
+
+export type FetchImpl = (
+  input: string,
+  init?: RequestInit,
+) => Promise<Response>;
 
 export type CandidateInput = {
   agentSessionId: string;
@@ -103,10 +104,11 @@ export async function postInputCandidate(
   input: CandidateInput,
   options: {
     fetchImpl: FetchImpl;
+    adapter: string;
+    adapterVersion: string;
     coreUrl?: string;
     timeoutMs?: number;
     eventId?: string;
-    adapterVersion?: string;
   },
 ): Promise<Admission> {
   const eventId = options.eventId ?? randomUUID();
@@ -127,8 +129,8 @@ export async function postInputCandidate(
     event_type: "input_candidate",
     occurred_at: new Date().toISOString(),
     payload_version: 1,
-    adapter: ADAPTER,
-    adapter_version: options.adapterVersion ?? ADAPTER_VERSION,
+    adapter: options.adapter,
+    adapter_version: options.adapterVersion,
     agent_session_id: input.agentSessionId,
     input_id: input.messageId,
     project_id: input.projectId,
