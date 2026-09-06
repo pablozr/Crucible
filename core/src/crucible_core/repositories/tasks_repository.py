@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import sqlite3
 
+from pydantic import BaseModel
+
 from crucible_core.schemas.persistence import (
     BaselineFileRow,
     InputRef,
@@ -12,6 +14,37 @@ from crucible_core.schemas.persistence import (
     TaskInputLink,
     TaskPageRow,
 )
+
+
+class ActiveTaskRef(BaseModel):
+    id: str
+    session_id: str
+
+
+def find_active_task_by_session(
+    connection: sqlite3.Connection, session_id: str
+) -> str | None:
+    row = connection.execute(
+        "SELECT id FROM tasks WHERE session_id = ? "
+        "AND status IN ('running', 'finalizing') "
+        "ORDER BY started_at DESC, id DESC LIMIT 1",
+        (session_id,),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def find_active_task_by_tree(
+    connection: sqlite3.Connection, tree_id: str
+) -> ActiveTaskRef | None:
+    row = connection.execute(
+        "SELECT id, session_id FROM tasks WHERE working_tree_id = ? "
+        "AND status IN ('running', 'finalizing') LIMIT 1",
+        (tree_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    task_id, task_session_id = row
+    return ActiveTaskRef(id=task_id, session_id=task_session_id)
 
 
 def find_input(

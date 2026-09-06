@@ -11,6 +11,8 @@ from crucible_core.schemas.persistence import (
     InboundEventDetail,
     NewAcceptedEvent,
     NewAdmissionCandidate,
+    NewNoInputDecision,
+    NoInputDecisionRow,
 )
 
 
@@ -18,14 +20,15 @@ def find_event(
     connection: sqlite3.Connection, event_id: str
 ) -> InboundEvent | None:
     row = connection.execute(
-        "SELECT payload_hash, status, outcome, input_id, task_id "
+        "SELECT payload_hash, status, outcome, input_id, task_id, "
+        "failure_code "
         "FROM inbound_events WHERE id = ?",
         (event_id,),
     ).fetchone()
     if row is None:
         return None
 
-    payload_hash, status, outcome, input_id, task_id = row
+    payload_hash, status, outcome, input_id, task_id, failure_code = row
 
     return InboundEvent(
         payload_hash=payload_hash,
@@ -33,6 +36,7 @@ def find_event(
         outcome=outcome,
         input_id=input_id,
         task_id=task_id,
+        failure_code=failure_code,
     )
 
 
@@ -110,6 +114,21 @@ def insert_accepted_event(
             event.input_id,
             event.task_id,
         ),
+    )
+
+
+def insert_accepted_overlap_event(
+    connection: sqlite3.Connection,
+    event_id: str,
+    payload_hash: str,
+    event_type: str,
+    received_at: str,
+) -> None:
+    connection.execute(
+        "INSERT INTO inbound_events (id, payload_hash, status, "
+        "event_type, received_at, outcome) "
+        "VALUES (?, ?, 'accepted', ?, ?, 'released_overlap')",
+        (event_id, payload_hash, event_type, received_at),
     )
 
 
@@ -321,4 +340,48 @@ def delete_candidate_files(
     connection.execute(
         "DELETE FROM candidate_baseline_files WHERE candidate_id = ?",
         (candidate_id,),
+    )
+
+
+def find_no_input_decision(
+    connection: sqlite3.Connection,
+    adapter: str,
+    agent_session_id: str,
+    native_input_id: str,
+) -> NoInputDecisionRow | None:
+    row = connection.execute(
+        "SELECT admission_hash, outcome, event_id, reference_task_id "
+        "FROM admission_no_input_decisions WHERE adapter = ? "
+        "AND agent_session_id = ? AND native_input_id = ?",
+        (adapter, agent_session_id, native_input_id),
+    ).fetchone()
+    if row is None:
+        return None
+    admission_hash, outcome, event_id, reference_task_id = row
+    return NoInputDecisionRow(
+        admission_hash=admission_hash,
+        outcome=outcome,
+        event_id=event_id,
+        reference_task_id=reference_task_id,
+    )
+
+
+def insert_no_input_decision(
+    connection: sqlite3.Connection, decision: NewNoInputDecision
+) -> None:
+    connection.execute(
+        "INSERT INTO admission_no_input_decisions (adapter, "
+        "agent_session_id, native_input_id, admission_hash, outcome, "
+        "event_id, reference_task_id, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            decision.adapter,
+            decision.agent_session_id,
+            decision.native_input_id,
+            decision.admission_hash,
+            decision.outcome,
+            decision.event_id,
+            decision.reference_task_id,
+            decision.created_at,
+        ),
     )

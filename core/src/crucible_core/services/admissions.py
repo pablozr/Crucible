@@ -31,8 +31,10 @@ from crucible_core.schemas.persistence import (
     InboundEvent,
     NewAcceptedEvent,
     NewAdmissionCandidate,
+    NewNoInputDecision,
     NewStoredInput,
     NewTask,
+    StoredInput,
 )
 from crucible_core.schemas.projects import Project
 from crucible_core.services.projects import ProjectError, resolve_project
@@ -74,6 +76,57 @@ def admit_event(database_path: Path, event: EventRequest) -> dict[str, object]:
 
     try:
         project = _resolve_event_project(event)
+        session_id, tree_id = _ensure_session(
+            database_path, event, project.id, project.git_root
+        )
+        delivery = event.payload.get("delivery")
+
+        with connect(database_path) as connection:
+            active_same = tasks_repo.find_active_task_by_session(
+                connection, session_id
+            )
+
+        if delivery == "steer":
+            if active_same is None:
+                replayed = _persist_steer_without_task(
+                    database_path, event, event_id, payload_hash, now
+                )
+                if replayed is not None:
+                    return replayed
+            return _join_active_task(
+                database_path,
+                event,
+                event_id,
+                payload_hash,
+                session_id,
+                active_same,
+                now,
+            )
+
+        if active_same is not None:
+            return _join_active_task(
+                database_path,
+                event,
+                event_id,
+                payload_hash,
+                session_id,
+                active_same,
+                now,
+            )
+
+        with connect(database_path) as connection:
+            blocking = tasks_repo.find_active_task_by_tree(connection, tree_id)
+
+        if blocking is not None:
+            return _persist_released_overlap(
+                database_path,
+                event,
+                event_id,
+                payload_hash,
+                blocking.id,
+                now,
+            )
+
         baseline = _capture_baseline(
             Path(project.git_root),
             project.max_snapshot_file_size_bytes,
@@ -151,7 +204,10 @@ def admit_event(database_path: Path, event: EventRequest) -> dict[str, object]:
             deadline,
         )
     except AdmissionError as error:
-        if error.code == "IDEMPOTENCY_CONFLICT":
+        if error.code in (
+            "IDEMPOTENCY_CONFLICT",
+            "STEER_WITHOUT_ACTIVE_TASK",
+        ):
             raise
         logger.warning(
             "admission rejected code=%s event_id=%s",
@@ -539,7 +595,7 @@ def _validate_event(event: EventRequest) -> None:
         raise AdmissionError("UNKNOWN_EVENT_TYPE")
     if event.payload_version != 1:
         raise AdmissionError("UNSUPPORTED_PAYLOAD_VERSION")
-    if event.payload.get("delivery") != "new":
+    if event.payload.get("delivery") not in ("new", "steer"):
         raise AdmissionError("UNSUPPORTED_DELIVERY")
     if (
         event.occurred_at.tzinfo is None
@@ -595,6 +651,369 @@ def _persist_session(
     return session_id, tree_id
 
 
+def _ensure_session(
+    database_path: Path,
+    event: EventRequest,
+    project_id: str,
+    git_root: str,
+) -> tuple[str, str]:
+    with connect(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        tree_id = sessions_repo.get_working_tree_id(connection, git_root)
+        if tree_id is None:
+            tree_id = str(uuid.uuid4())
+            sessions_repo.upsert_project(connection, project_id, git_root)
+            sessions_repo.insert_working_tree(
+                connection, tree_id, project_id, git_root
+            )
+        session_id = sessions_repo.find_session_id(
+            connection, event.adapter, event.agent_session_id
+        )
+        if session_id is None:
+            session_id = str(uuid.uuid4())
+            sessions_repo.insert_session(
+                connection,
+                session_id,
+                tree_id,
+                event.adapter,
+                event.agent_session_id,
+                event.adapter_version,
+                str(event.workspace_path.resolve()),
+            )
+        connection.commit()
+    return session_id, tree_id
+
+
+def _join_active_task(
+    database_path: Path,
+    event: EventRequest,
+    event_id: str,
+    payload_hash: str,
+    session_id: str,
+    active_task_id: str,
+    now: str,
+) -> dict[str, object]:
+    try:
+        with connect(database_path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = admissions_repo.find_event(connection, event_id)
+            if existing:
+                connection.rollback()
+                return _reconcile_existing(event_id, payload_hash, existing)
+            stored_input = tasks_repo.find_input(
+                connection, session_id, event.input_id
+            )
+            if stored_input:
+                if stored_input.admission_hash != _admission_hash(event):
+                    raise AdmissionError("IDEMPOTENCY_CONFLICT", 409)
+                admissions_repo.insert_accepted_event(
+                    connection,
+                    NewAcceptedEvent(
+                        event_id=event_id,
+                        payload_hash=payload_hash,
+                        event_type=event.event_type,
+                        received_at=now,
+                        input_id=stored_input.id,
+                        task_id=stored_input.task_id,
+                    ),
+                )
+                connection.commit()
+                return event_response(
+                    event_id,
+                    "accepted",
+                    "admitted",
+                    stored_input.id,
+                    stored_input.task_id,
+                ).model_dump()
+            decision = admissions_repo.find_no_input_decision(
+                connection,
+                event.adapter,
+                event.agent_session_id,
+                event.input_id,
+            )
+            if decision:
+                connection.rollback()
+                return _semantic_join_conflict(database_path, event, event_id)
+            input_id = str(uuid.uuid4())
+            tasks_repo.insert_input(
+                connection,
+                NewStoredInput(
+                    row_id=input_id,
+                    session_id=session_id,
+                    task_id=active_task_id,
+                    input_id=event.input_id,
+                    admission_hash=_admission_hash(event),
+                ),
+            )
+            admissions_repo.insert_accepted_event(
+                connection,
+                NewAcceptedEvent(
+                    event_id=event_id,
+                    payload_hash=payload_hash,
+                    event_type=event.event_type,
+                    received_at=now,
+                    input_id=input_id,
+                    task_id=active_task_id,
+                ),
+            )
+            connection.commit()
+        return event_response(
+            event_id, "accepted", "admitted", input_id, active_task_id
+        ).model_dump()
+    except AdmissionError:
+        raise
+    except sqlite3.IntegrityError:
+        logger.warning(
+            "admission conflict code=ADMISSION_CONFLICT event_id=%s",
+            event_id,
+        )
+        return _reject_event(
+            database_path, event, event_id, payload_hash, "ADMISSION_CONFLICT"
+        )
+
+
+def _semantic_join_conflict(
+    database_path: Path, event: EventRequest, event_id: str
+) -> dict[str, object]:
+    with connect(database_path) as connection:
+        decision = admissions_repo.find_no_input_decision(
+            connection, event.adapter, event.agent_session_id, event.input_id
+        )
+        if decision and decision.admission_hash == _admission_hash(event):
+            if decision.outcome == "released_overlap":
+                return _replay_overlap_decision(database_path, event, event_id)
+            return _replay_steer_rejection(database_path, event, event_id)
+    raise AdmissionError("IDEMPOTENCY_CONFLICT", 409)
+
+
+def _replay_overlap_decision(
+    database_path: Path, event: EventRequest, event_id: str
+) -> dict[str, object]:
+    with connect(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        existing = admissions_repo.find_event(connection, event_id)
+        if existing:
+            connection.rollback()
+            return _reconcile_existing(
+                event_id, _payload_hash(event), existing
+            )
+        admissions_repo.insert_accepted_overlap_event(
+            connection,
+            event_id,
+            _payload_hash(event),
+            event.event_type,
+            utc_now_iso(),
+        )
+        connection.commit()
+    return event_response(
+        event_id, "accepted", "released_overlap", None, None
+    ).model_dump()
+
+
+def _replay_steer_rejection(
+    database_path: Path, event: EventRequest, event_id: str
+) -> dict[str, object]:
+    with connect(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        existing = admissions_repo.find_event(connection, event_id)
+        if existing:
+            connection.rollback()
+            return _reconcile_existing(
+                event_id, _payload_hash(event), existing
+            )
+        admissions_repo.insert_rejected_event(
+            connection,
+            event_id,
+            _payload_hash(event),
+            event.event_type,
+            utc_now_iso(),
+            "STEER_WITHOUT_ACTIVE_TASK",
+        )
+        connection.commit()
+    logger.warning(
+        "admission rejected code=STEER_WITHOUT_ACTIVE_TASK event_id=%s",
+        event_id,
+    )
+    raise AdmissionError("STEER_WITHOUT_ACTIVE_TASK", 409)
+
+
+def _persist_released_overlap(
+    database_path: Path,
+    event: EventRequest,
+    event_id: str,
+    payload_hash: str,
+    blocking_task_id: str,
+    now: str,
+) -> dict[str, object]:
+    try:
+        with connect(database_path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = admissions_repo.find_event(connection, event_id)
+            if existing:
+                connection.rollback()
+                return _reconcile_existing(event_id, payload_hash, existing)
+            decision = admissions_repo.find_no_input_decision(
+                connection,
+                event.adapter,
+                event.agent_session_id,
+                event.input_id,
+            )
+            if decision:
+                connection.rollback()
+                if decision.admission_hash != _admission_hash(event):
+                    raise AdmissionError("IDEMPOTENCY_CONFLICT", 409)
+                return _replay_overlap_decision(database_path, event, event_id)
+            stored_input = tasks_repo.find_input_by_adapter_session(
+                connection,
+                event.adapter,
+                event.agent_session_id,
+                event.input_id,
+            )
+            if stored_input:
+                connection.rollback()
+                if stored_input.admission_hash != _admission_hash(event):
+                    raise AdmissionError("IDEMPOTENCY_CONFLICT", 409)
+                return _replay_admitted_input(
+                    database_path, event, event_id, stored_input
+                )
+            admissions_repo.insert_no_input_decision(
+                connection,
+                NewNoInputDecision(
+                    adapter=event.adapter,
+                    agent_session_id=event.agent_session_id,
+                    native_input_id=event.input_id,
+                    admission_hash=_admission_hash(event),
+                    outcome="released_overlap",
+                    event_id=event_id,
+                    reference_task_id=blocking_task_id,
+                    created_at=now,
+                ),
+            )
+            admissions_repo.insert_accepted_overlap_event(
+                connection, event_id, payload_hash, event.event_type, now
+            )
+            connection.commit()
+        return event_response(
+            event_id, "accepted", "released_overlap", None, None
+        ).model_dump()
+    except AdmissionError:
+        raise
+    except sqlite3.IntegrityError:
+        logger.warning(
+            "admission conflict code=ADMISSION_CONFLICT event_id=%s",
+            event_id,
+        )
+        return _reject_event(
+            database_path, event, event_id, payload_hash, "ADMISSION_CONFLICT"
+        )
+
+
+def _persist_steer_without_task(
+    database_path: Path,
+    event: EventRequest,
+    event_id: str,
+    payload_hash: str,
+    now: str,
+) -> dict[str, object] | None:
+    with connect(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        existing = admissions_repo.find_event(connection, event_id)
+        if existing:
+            connection.rollback()
+            _reconcile_existing(event_id, payload_hash, existing)
+            raise AdmissionError("STEER_WITHOUT_ACTIVE_TASK", 409)
+        decision = admissions_repo.find_no_input_decision(
+            connection,
+            event.adapter,
+            event.agent_session_id,
+            event.input_id,
+        )
+        if decision:
+            connection.rollback()
+            if decision.admission_hash != _admission_hash(event):
+                raise AdmissionError("IDEMPOTENCY_CONFLICT", 409)
+            if decision.outcome == "released_overlap":
+                return _replay_overlap_decision(database_path, event, event_id)
+            _replay_steer_rejection(database_path, event, event_id)
+            raise AdmissionError("STEER_WITHOUT_ACTIVE_TASK", 409)
+        stored_input = tasks_repo.find_input_by_adapter_session(
+            connection,
+            event.adapter,
+            event.agent_session_id,
+            event.input_id,
+        )
+        if stored_input:
+            connection.rollback()
+            if stored_input.admission_hash != _admission_hash(event):
+                raise AdmissionError("IDEMPOTENCY_CONFLICT", 409)
+            return _replay_admitted_input(
+                database_path, event, event_id, stored_input
+            )
+        try:
+            admissions_repo.insert_no_input_decision(
+                connection,
+                NewNoInputDecision(
+                    adapter=event.adapter,
+                    agent_session_id=event.agent_session_id,
+                    native_input_id=event.input_id,
+                    admission_hash=_admission_hash(event),
+                    outcome="steer_without_active_task",
+                    event_id=event_id,
+                    reference_task_id=None,
+                    created_at=now,
+                ),
+            )
+            admissions_repo.insert_rejected_event(
+                connection,
+                event_id,
+                payload_hash,
+                event.event_type,
+                now,
+                "STEER_WITHOUT_ACTIVE_TASK",
+            )
+            connection.commit()
+        except sqlite3.IntegrityError:
+            connection.rollback()
+            logger.warning(
+                "admission conflict code=ADMISSION_CONFLICT event_id=%s",
+                event_id,
+            )
+            raise AdmissionError("ADMISSION_CONFLICT", 409) from None
+    logger.warning(
+        "admission rejected code=STEER_WITHOUT_ACTIVE_TASK event_id=%s",
+        event_id,
+    )
+    raise AdmissionError("STEER_WITHOUT_ACTIVE_TASK", 409)
+
+
+def _replay_admitted_input(
+    database_path: Path,
+    event: EventRequest,
+    event_id: str,
+    stored_input: StoredInput,
+) -> dict[str, object]:
+    with connect(database_path) as connection:
+        admissions_repo.insert_accepted_event(
+            connection,
+            NewAcceptedEvent(
+                event_id=event_id,
+                payload_hash=_payload_hash(event),
+                event_type=event.event_type,
+                received_at=utc_now_iso(),
+                input_id=stored_input.id,
+                task_id=stored_input.task_id,
+            ),
+        )
+        connection.commit()
+    return event_response(
+        event_id,
+        "accepted",
+        "admitted",
+        stored_input.id,
+        stored_input.task_id,
+    ).model_dump()
+
+
 def _payload_hash(event: EventRequest) -> str:
     payload = event.model_dump(mode="json", exclude_none=True)
     return canonical_json_sha256(payload)
@@ -625,27 +1044,61 @@ def _semantic_outcome(
     row = tasks_repo.find_input_by_adapter_session(
         connection, event.adapter, event.agent_session_id, event.input_id
     )
-    if not row:
-        return None
-    if row.admission_hash != _admission_hash(event):
-        raise AdmissionError("IDEMPOTENCY_CONFLICT", 409)
+    if row:
+        if row.admission_hash != _admission_hash(event):
+            raise AdmissionError("IDEMPOTENCY_CONFLICT", 409)
 
-    admissions_repo.insert_accepted_event(
+        admissions_repo.insert_accepted_event(
+            connection,
+            NewAcceptedEvent(
+                event_id=str(event.event_id),
+                payload_hash=_payload_hash(event),
+                event_type=event.event_type,
+                received_at=utc_now_iso(),
+                input_id=row.id,
+                task_id=row.task_id,
+            ),
+        )
+        connection.commit()
+
+        return event_response(
+            str(event.event_id), "accepted", "admitted", row.id, row.task_id
+        ).model_dump()
+
+    decision = admissions_repo.find_no_input_decision(
+        connection, event.adapter, event.agent_session_id, event.input_id
+    )
+    if not decision:
+        return None
+    if decision.admission_hash != _admission_hash(event):
+        raise AdmissionError("IDEMPOTENCY_CONFLICT", 409)
+    if decision.outcome == "released_overlap":
+        admissions_repo.insert_accepted_overlap_event(
+            connection,
+            str(event.event_id),
+            _payload_hash(event),
+            event.event_type,
+            utc_now_iso(),
+        )
+        connection.commit()
+        return event_response(
+            str(event.event_id), "accepted", "released_overlap", None, None
+        ).model_dump()
+
+    admissions_repo.insert_rejected_event(
         connection,
-        NewAcceptedEvent(
-            event_id=str(event.event_id),
-            payload_hash=_payload_hash(event),
-            event_type=event.event_type,
-            received_at=utc_now_iso(),
-            input_id=row.id,
-            task_id=row.task_id,
-        ),
+        str(event.event_id),
+        _payload_hash(event),
+        event.event_type,
+        utc_now_iso(),
+        "STEER_WITHOUT_ACTIVE_TASK",
     )
     connection.commit()
-
-    return event_response(
-        str(event.event_id), "accepted", "admitted", row.id, row.task_id
-    ).model_dump()
+    logger.warning(
+        "admission rejected code=STEER_WITHOUT_ACTIVE_TASK event_id=%s",
+        event.event_id,
+    )
+    raise AdmissionError("STEER_WITHOUT_ACTIVE_TASK", 409)
 
 
 def _reconcile_existing(
@@ -653,6 +1106,8 @@ def _reconcile_existing(
 ) -> dict[str, object]:
     if row is None or row.payload_hash != payload_hash:
         raise AdmissionError("IDEMPOTENCY_CONFLICT", 409)
+    if row.failure_code == "STEER_WITHOUT_ACTIVE_TASK":
+        raise AdmissionError("STEER_WITHOUT_ACTIVE_TASK", 409)
     return reconciled_event_response(event_id, row).model_dump()
 
 

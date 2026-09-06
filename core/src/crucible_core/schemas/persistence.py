@@ -9,6 +9,7 @@ class InboundEvent(BaseModel):
     outcome: str
     input_id: str | None = None
     task_id: str | None = None
+    failure_code: str | None = None
 
 
 class InboundEventDetail(BaseModel):
@@ -118,3 +119,21 @@ class NewStoredInput(BaseModel):
     task_id: str
     input_id: str
     admission_hash: str
+
+
+class NewNoInputDecision(BaseModel):
+    adapter: str
+    agent_session_id: str
+    native_input_id: str
+    admission_hash: str
+    outcome: str
+    event_id: str
+    reference_task_id: str | None = None
+    created_at: str
+
+
+class NoInputDecisionRow(BaseModel):
+    admission_hash: str
+    outcome: str
+    event_id: str
+    reference_task_id: str | None = None

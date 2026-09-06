@@ -20,20 +20,20 @@ def _upgrade(path, revision: str) -> None:
 def test_migrations_upgrade_fresh_database_to_head(tmp_path):
     database_path = tmp_path / "fresh.db"
     _upgrade(database_path, "head")
-    _assert_candidate_evidence_table(database_path)
+    _assert_head_tables(database_path)
 
 
 def test_migrations_upgrade_supported_previous_versions_to_head(tmp_path):
-    for revision in ("0001", "0002"):
+    for revision in ("0001", "0002", "0003"):
         database_path = tmp_path / f"{revision}.db"
         _upgrade(database_path, revision)
         if revision == "0001":
             _insert_legacy_task(database_path)
         _upgrade(database_path, "head")
-        _assert_candidate_evidence_table(database_path)
+        _assert_head_tables(database_path)
 
 
-def _assert_candidate_evidence_table(database_path) -> None:
+def _assert_head_tables(database_path) -> None:
     engine = create_engine(f"sqlite:///{database_path.as_posix()}")
     with engine.connect() as connection:
         row = connection.exec_driver_sql(
@@ -43,8 +43,14 @@ def _assert_candidate_evidence_table(database_path) -> None:
         revision = connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
         ).scalar_one()
+        decisions = connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master "
+            "WHERE type = 'table' "
+            "AND name = 'admission_no_input_decisions'"
+        ).fetchone()
     assert row
-    assert revision == "0003"
+    assert revision == "0004"
+    assert decisions
 
 
 def _insert_legacy_task(database_path) -> None:

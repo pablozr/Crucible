@@ -16,6 +16,9 @@ ERROR_MESSAGES = {
     "INVALID_CURSOR": "Cursor is invalid.",
     "IDEMPOTENCY_CONFLICT": "Event conflicts with a previous delivery.",
     "ADMISSION_CONFLICT": "Admission conflicts with existing state.",
+    "STEER_WITHOUT_ACTIVE_TASK": (
+        "No active task in this session to steer. Start a new request first."
+    ),
 }
 
 VALIDATION_MESSAGE = "Request validation failed."

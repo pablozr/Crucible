@@ -31,7 +31,7 @@ def event_response(
         outcome=outcome,
         input_id=input_id,
         task_id=task_id,
-        dispatch_authorized=status == "accepted",
+        dispatch_authorized=outcome == "admitted",
     )
 
 
@@ -45,7 +45,7 @@ def event_detail(
         outcome=event.outcome,
         input_id=event.input_id,
         task_id=event.task_id,
-        dispatch_authorized=event.status == "accepted",
+        dispatch_authorized=event.outcome == "admitted",
         payload_hash=event.payload_hash,
         failure_code=event.failure_code,
     )
