@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from crucible_core.core.database import connect
+from crucible_core.core.errors import AdmissionError
 from crucible_core.logging import get_logger
 from crucible_core.repositories import admissions_repository as admissions_repo
 from crucible_core.repositories import tasks_repository as tasks_repo
@@ -17,7 +18,6 @@ from crucible_core.responses.admissions import (
 )
 from crucible_core.schemas.admissions import EventRequest
 from crucible_core.services.admission_lifecycle import (
-    AdmissionError,
     AdmissionLifecycle,
 )
 from crucible_core.services.baseline_capture import capture_baseline

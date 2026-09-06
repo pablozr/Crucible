@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from crucible_core.core.database import connect
+from crucible_core.core.errors import AdmissionError
 from crucible_core.logging import get_logger
 from crucible_core.repositories import admissions_repository as admissions_repo
 from crucible_core.repositories import sessions_repository as sessions_repo
@@ -38,13 +39,6 @@ from crucible_core.utils.functions import (
 CAPTURE_DEADLINE_SECONDS = 2
 
 logger = get_logger(__name__)
-
-
-class AdmissionError(ValueError):
-    def __init__(self, code: str, status_code: int = 400) -> None:
-        self.code = code
-        self.status_code = status_code
-        super().__init__(code)
 
 
 _MAX_ROUTE_ATTEMPTS = 3
