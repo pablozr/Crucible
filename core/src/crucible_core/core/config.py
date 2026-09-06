@@ -20,5 +20,9 @@ class Settings:
 
 def load_settings() -> Settings:
     override = os.environ.get("CRUCIBLE_DATA_DIR")
-    data_dir = Path(override) if override else Path(user_data_path("Crucible", appauthor=False))
+    data_dir = (
+        Path(override)
+        if override
+        else Path(user_data_path("Crucible", appauthor=False))
+    )
     return Settings(data_dir=data_dir.expanduser().resolve())

@@ -3,21 +3,15 @@ from __future__ import annotations
 import json
 import subprocess
 import uuid
-from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
 
+from crucible_core.schemas.projects import Project
+
 
 class ProjectError(ValueError):
     pass
-
-
-@dataclass(frozen=True)
-class Project:
-    id: str
-    git_root: Path
-    max_snapshot_file_size_bytes: int = 1_048_576
 
 
 def resolve_project(directory: Path) -> Project:
@@ -62,7 +56,15 @@ def resolve_project(directory: Path) -> Project:
             raise ProjectError("INVALID_PROJECT_CONFIG")
         if "max_snapshot_file_size_bytes" in tracking:
             limit = tracking["max_snapshot_file_size_bytes"]
-            if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
+            if (
+                not isinstance(limit, int)
+                or isinstance(limit, bool)
+                or limit <= 0
+            ):
                 raise ProjectError("INVALID_PROJECT_CONFIG")
 
-    return Project(id=project_id, git_root=root, max_snapshot_file_size_bytes=limit)
+    return Project(
+        id=project_id,
+        git_root=str(root),
+        max_snapshot_file_size_bytes=limit,
+    )

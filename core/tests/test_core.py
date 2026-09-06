@@ -12,7 +12,11 @@ def test_health_and_status(monkeypatch, tmp_path):
     with TestClient(app) as client:
         health = client.get("/v1/health")
         status = client.get("/v1/status")
-    assert health.json() == {"status": "ok", "version": "0.1.0", "api_version": "v1"}
+    assert health.json() == {
+        "status": "ok",
+        "version": "0.1.0",
+        "api_version": "v1",
+    }
     assert status.json()["database"] == {
         "path": str(tmp_path / "crucible.db"),
         "migration_revision": "0001",
@@ -62,7 +66,12 @@ def test_database_enforces_active_task_constraint(monkeypatch, tmp_path):
         """
     )
     try:
-        connection.execute("INSERT INTO tasks VALUES ('task-two', 'session', 'tree', 'finalizing')")
+        connection.execute(
+            (
+                "INSERT INTO tasks VALUES "
+                "('task-two', 'session', 'tree', 'finalizing')"
+            )
+        )
     except sqlite3.IntegrityError:
         pass
     else:
