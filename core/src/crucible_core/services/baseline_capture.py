@@ -20,7 +20,7 @@ def capture_baseline(
     max_size: int,
     deadline: float,
 ) -> dict[str, Any]:
-    from crucible_core.services.admissions import AdmissionError
+    from crucible_core.services.admission_lifecycle import AdmissionError
 
     for _ in range(2):
         try:
@@ -46,7 +46,7 @@ def capture_baseline(
 
 
 def _git_state(root: Path, deadline: float) -> dict[str, Any]:
-    from crucible_core.services.admissions import AdmissionError
+    from crucible_core.services.admission_lifecycle import AdmissionError
 
     try:
         head = _git(root, ["rev-parse", "--verify", "HEAD"], deadline)
@@ -78,7 +78,7 @@ def _git_state(root: Path, deadline: float) -> dict[str, Any]:
 
 
 def _git(root: Path, arguments: list[str], deadline: float) -> bytes:
-    from crucible_core.services.admissions import AdmissionError
+    from crucible_core.services.admission_lifecycle import AdmissionError
 
     timeout = min(SUBPROCESS_TIMEOUT_SECONDS, deadline - time.monotonic())
     if timeout <= 0:
@@ -98,7 +98,7 @@ def _git(root: Path, arguments: list[str], deadline: float) -> bytes:
 def _snapshot_files(
     root: Path, status: bytes, max_size: int, deadline: float
 ) -> list[BaselineFileRow]:
-    from crucible_core.services.admissions import AdmissionError
+    from crucible_core.services.admission_lifecycle import AdmissionError
 
     rows: list[BaselineFileRow] = []
     for entry in status.split(b"\0"):
