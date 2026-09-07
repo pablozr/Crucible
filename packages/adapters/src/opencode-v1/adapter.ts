@@ -1,4 +1,5 @@
 import { isAbsolute } from "node:path";
+import { randomUUID } from "node:crypto";
 
 import type { DispatchResult, UntrackedDispatchContext } from "../contracts.js";
 import { postInputCandidate } from "../runtime/core-client.js";
@@ -36,7 +37,7 @@ export async function dispatchOpenCodeV1<T>(
   const fetchImpl =
     testing.fetchImpl ?? (globalThis.fetch as typeof fetch);
   const resolveProject = testing.resolveProject ?? defaultResolveProject;
-  const eventId = testing.eventId ?? request.messageId;
+  const eventId = testing.eventId ?? randomUUID();
 
   if (request.openCodeVersion !== SUPPORTED_OPENCODE_VERSION) {
     const context = skippedContext("INCOMPATIBLE_OPENCODE", eventId);

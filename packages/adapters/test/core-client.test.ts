@@ -8,6 +8,7 @@ import {
 
 const ADAPTER = "opencode-v1";
 const ADAPTER_VERSION = "0.1.0";
+const EVENT_ID = "123e4567-e89b-42d3-a456-426614174001";
 
 function input(overrides = {}) {
   return {
@@ -29,7 +30,7 @@ function options(overrides = {}) {
       }),
     adapter: ADAPTER,
     adapterVersion: ADAPTER_VERSION,
-    eventId: "evt-1",
+    eventId: EVENT_ID,
     ...overrides,
   };
 }
@@ -40,7 +41,7 @@ function okEvent(overrides = {}) {
     message: "Event received.",
     data: {
       event: {
-        event_id: "evt-1",
+        event_id: EVENT_ID,
         status: "accepted",
         outcome: "admitted",
         input_id: "msg_456",
@@ -76,10 +77,10 @@ test("admitted result posts input_candidate once with mapped payload", async () 
   assert.equal(admission.outcome, "admitted");
   assert.equal(admission.taskId, "task-1");
   assert.equal(admission.inputId, "msg_456");
-  assert.equal(admission.eventId, "evt-1");
+  assert.equal(admission.eventId, EVENT_ID);
   const sent = lastBody() as Record<string, unknown>;
   assert.equal(sent["event_type"], "input_candidate");
-  assert.equal(sent["event_id"], "evt-1");
+  assert.equal(sent["event_id"], EVENT_ID);
   assert.equal(sent["adapter"], ADAPTER);
   assert.equal(sent["adapter_version"], ADAPTER_VERSION);
   assert.deepEqual(sent["payload"], {
@@ -105,7 +106,7 @@ test("network failure fails open with CORE_UNAVAILABLE", async () => {
     (admission as { diagnostic: string }).diagnostic,
     "CORE_UNAVAILABLE",
   );
-  assert.equal(admission.eventId, "evt-1");
+  assert.equal(admission.eventId, EVENT_ID);
 });
 
 test("timeout abort fails open with CORE_UNAVAILABLE", async () => {
@@ -206,5 +207,71 @@ test("unauthorized steer error preserves code", async () => {
   assert.equal(
     (admission as { diagnostic: string }).diagnostic,
     "STEER_WITHOUT_ACTIVE_TASK",
+  );
+});
+
+test("mismatched success event_id fails open", async () => {
+  const { fetchImpl } = okFetch(
+    okEvent({ event_id: "123e4567-e89b-42d3-a456-426614174002" }),
+  );
+
+  const admission = await postInputCandidate(
+    input(),
+    options({ fetchImpl }),
+  );
+
+  assert.equal(admission.tracked, false);
+  assert.equal(admission.outcome, "tracking_skipped");
+  assert.equal(
+    (admission as { diagnostic: string }).diagnostic,
+    "CORE_UNAVAILABLE",
+  );
+  assert.equal(admission.eventId, EVENT_ID);
+});
+
+test("missing success event_id fails open", async () => {
+  const body = okEvent();
+  delete (
+    body.data.event as Record<string, unknown>
+  )["event_id"];
+  const { fetchImpl } = okFetch(body);
+
+  const admission = await postInputCandidate(
+    input(),
+    options({ fetchImpl }),
+  );
+
+  assert.equal(admission.tracked, false);
+  assert.equal(admission.outcome, "tracking_skipped");
+  assert.equal(
+    (admission as { diagnostic: string }).diagnostic,
+    "CORE_UNAVAILABLE",
+  );
+  assert.equal(admission.eventId, EVENT_ID);
+});
+
+test("admitted result without a task fails open", async () => {
+  const { fetchImpl } = okFetch(okEvent({ task_id: null }));
+
+  const admission = await postInputCandidate(input(), options({ fetchImpl }));
+
+  assert.equal(admission.tracked, false);
+  assert.equal(admission.outcome, "tracking_skipped");
+  assert.equal(
+    (admission as { diagnostic: string }).diagnostic,
+    "CORE_UNAVAILABLE",
+  );
+});
+
+test("admitted result without an input fails open", async () => {
+  const { fetchImpl } = okFetch(okEvent({ input_id: null }));
+
+  const admission = await postInputCandidate(input(), options({ fetchImpl }));
+
+  assert.equal(admission.tracked, false);
+  assert.equal(admission.outcome, "tracking_skipped");
+  assert.equal(
+    (admission as { diagnostic: string }).diagnostic,
+    "CORE_UNAVAILABLE",
   );
 });

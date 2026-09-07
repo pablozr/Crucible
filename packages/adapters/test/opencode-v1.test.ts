@@ -10,6 +10,7 @@ import type { FetchImpl } from "../src/runtime/core-client.js";
 import { resolveProject } from "../src/runtime/project-resolver.js";
 
 const PROJECT_ID = "123e4567-e89b-42d3-a456-426614174000";
+const EVENT_ID = "123e4567-e89b-42d3-a456-426614174001";
 
 function request(overrides = {}) {
   return {
@@ -32,7 +33,7 @@ function okEvent(overrides = {}) {
     message: "Event received.",
     data: {
       event: {
-        event_id: "evt-1",
+        event_id: EVENT_ID,
         status: "accepted",
         outcome: "admitted",
         input_id: "msg_456",
@@ -93,7 +94,13 @@ test("dispatch waits for admitted Core result (no dispatch before Core resolves)
   const pending = dispatchOpenCodeV1(
     request(),
     { dispatch: fn },
-    { testing: { fetchImpl, resolveProject: stubResolve() } },
+    {
+      testing: {
+        fetchImpl,
+        resolveProject: stubResolve(),
+        eventId: EVENT_ID,
+      },
+    },
   );
   await new Promise((resolve) => setTimeout(resolve, 10));
   assert.equal(calls.length, 0);
@@ -117,7 +124,7 @@ test("valid admitted Core result is tracked and posts input_candidate once", asy
       testing: {
         fetchImpl,
         resolveProject: stubResolve(),
-        eventId: "evt-1",
+        eventId: EVENT_ID,
       },
     },
   );
@@ -127,10 +134,11 @@ test("valid admitted Core result is tracked and posts input_candidate once", asy
   assert.equal(result.tracked, true);
   assert.equal(result.outcome, "admitted");
   assert.equal(result.taskId, "task-1");
-  assert.equal(result.eventId, "evt-1");
+  assert.equal(result.eventId, EVENT_ID);
   const sent = lastBody() as Record<string, unknown>;
   assert.equal(sent["event_type"], "input_candidate");
-  assert.equal(sent["event_id"], "evt-1");
+  assert.equal(sent["event_id"], EVENT_ID);
+  assert.equal(sent["input_id"], "msg_456");
   assert.deepEqual(sent["payload"], {
     delivery: "new",
     prompt: "do it",
@@ -260,4 +268,87 @@ test("uninitialized workspace fails open without writes or Core call", async () 
   assert.equal(fetchCalls, 0);
   assert.equal(calls.length, 1);
   assert.equal(readdirSync(root).sort().includes(".crucible"), false);
+});
+
+const uuidPattern =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+test("default event identity is a UUID distinct from the native input", async () => {
+  const seen: string[] = [];
+  const fetchImpl: FetchImpl = async (_url: string, init?: RequestInit) => {
+    const sent = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    seen.push(String(sent["event_id"]));
+
+    const body = okEvent({ event_id: sent["event_id"] });
+    return new Response(JSON.stringify(body), { status: 200 });
+  };
+  const { fn, calls } = dispatchStub();
+
+  const result = await dispatchOpenCodeV1(
+    request(),
+    { dispatch: fn },
+    { testing: { fetchImpl, resolveProject: stubResolve() } },
+  );
+
+  assert.equal(seen.length, 1);
+  assert.match(seen[0] ?? "", uuidPattern);
+  assert.notEqual(seen[0], "msg_456");
+  assert.equal(result.tracked, true);
+  assert.equal(result.eventId, seen[0]);
+  assert.equal(result.inputId, "msg_456");
+  assert.equal(calls.length, 1);
+});
+
+test("mismatched success event_id fails open but still dispatches", async () => {
+  const { fetchImpl } = okFetch(
+    okEvent({ event_id: "123e4567-e89b-42d3-a456-426614174002" }),
+  );
+  const { fn, calls } = dispatchStub();
+
+  const result = await dispatchOpenCodeV1(
+    request(),
+    { dispatch: fn },
+    {
+      testing: {
+        fetchImpl,
+        resolveProject: stubResolve(),
+        eventId: EVENT_ID,
+      },
+    },
+  );
+
+  assert.equal(result.tracked, false);
+  assert.equal(
+    (result as { diagnostic?: string }).diagnostic,
+    "CORE_UNAVAILABLE",
+  );
+  assert.equal(result.eventId, EVENT_ID);
+  assert.equal(calls.length, 1);
+});
+
+test("missing success event_id fails open but still dispatches", async () => {
+  const body = okEvent();
+  delete (body.data.event as Record<string, unknown>)["event_id"];
+  const { fetchImpl } = okFetch(body);
+  const { fn, calls } = dispatchStub();
+
+  const result = await dispatchOpenCodeV1(
+    request(),
+    { dispatch: fn },
+    {
+      testing: {
+        fetchImpl,
+        resolveProject: stubResolve(),
+        eventId: EVENT_ID,
+      },
+    },
+  );
+
+  assert.equal(result.tracked, false);
+  assert.equal(
+    (result as { diagnostic?: string }).diagnostic,
+    "CORE_UNAVAILABLE",
+  );
+  assert.equal(result.eventId, EVENT_ID);
+  assert.equal(calls.length, 1);
 });

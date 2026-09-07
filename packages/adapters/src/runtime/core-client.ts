@@ -58,7 +58,9 @@ function asEventAdmission(
   const event = data["event"] as Record<string, unknown>;
   if (
     typeof event["outcome"] !== "string" ||
-    typeof event["dispatch_authorized"] !== "boolean"
+    typeof event["dispatch_authorized"] !== "boolean" ||
+    typeof event["event_id"] !== "string" ||
+    (event["event_id"] as string) !== eventId
   ) {
     return undefined;
   }
@@ -72,6 +74,10 @@ function asEventAdmission(
       : null;
 
   if (outcome === "admitted" && event["dispatch_authorized"] === true) {
+    if (!taskId || !inputId) {
+      return undefined;
+    }
+
     return { tracked: true, outcome, taskId, inputId, eventId };
   }
 
