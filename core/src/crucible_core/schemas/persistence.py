@@ -55,6 +55,29 @@ class TaskOwnerRef(BaseModel):
     status: str
 
 
+class FinalizationEventRow(BaseModel):
+    payload_hash: str
+    status: str
+    outcome: str
+    input_id: str | None = None
+    task_id: str | None = None
+    failure_code: str | None = None
+
+
+class FrozenTaskState(BaseModel):
+    status: str
+    snapshot_frozen_at: str | None = None
+
+
+class GenerationRef(BaseModel):
+    capture_generation: int
+
+
+class RecoveryTaskRef(BaseModel):
+    task_id: str
+    snapshot_frozen_at: str | None = None
+
+
 class FinalizationTask(BaseModel):
     id: str
     session_id: str

@@ -5,6 +5,10 @@ import uuid
 
 from crucible_core.schemas.persistence import (
     BaselineFileRow,
+    FinalizationEventRow,
+    FrozenTaskState,
+    GenerationRef,
+    RecoveryTaskRef,
     TaskFileChangeRow,
 )
 
@@ -25,6 +29,45 @@ def input_belongs_to_task(
     )
 
 
+def get_finalization_event(
+    connection: sqlite3.Connection, event_id: str
+) -> FinalizationEventRow | None:
+    connection.row_factory = sqlite3.Row
+    row = connection.execute(
+        "SELECT payload_hash, status, outcome, input_id, task_id, "
+        "failure_code FROM inbound_events WHERE id = ?",
+        (event_id,),
+    ).fetchone()
+    if row is None:
+        return None
+
+    return FinalizationEventRow(
+        payload_hash=row["payload_hash"],
+        status=row["status"],
+        outcome=row["outcome"],
+        input_id=row["input_id"],
+        task_id=row["task_id"],
+        failure_code=row["failure_code"],
+    )
+
+
+def get_frozen_task_state(
+    connection: sqlite3.Connection, task_id: str
+) -> FrozenTaskState | None:
+    connection.row_factory = sqlite3.Row
+    row = connection.execute(
+        "SELECT status, snapshot_frozen_at FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        return None
+
+    return FrozenTaskState(
+        status=row["status"],
+        snapshot_frozen_at=row["snapshot_frozen_at"],
+    )
+
+
 def begin_finalization(
     connection: sqlite3.Connection,
     task_id: str,
@@ -34,13 +77,17 @@ def begin_finalization(
     terminal_outcome: str,
     compatibility_profile: str,
 ) -> int | None:
-    generation = connection.execute(
+    connection.row_factory = sqlite3.Row
+    row = connection.execute(
         "UPDATE working_trees SET capture_generation = capture_generation + 1 "
         "WHERE id = ? RETURNING capture_generation",
         (tree_id,),
     ).fetchone()
-    if generation is None:
+    if row is None:
         return None
+    generation = GenerationRef(
+        capture_generation=int(row["capture_generation"])
+    )
     changed = connection.execute(
         "UPDATE tasks SET status = 'finalizing', execution_id = ?, "
         "terminal_signal = ?, terminal_outcome = ?, "
@@ -51,11 +98,13 @@ def begin_finalization(
             terminal_signal,
             terminal_outcome,
             compatibility_profile,
-            generation[0],
+            generation.capture_generation,
             task_id,
         ),
     ).rowcount
-    return int(generation[0]) if changed == 1 else None
+    if changed == 1:
+        return generation.capture_generation
+    return None
 
 
 def publication_is_current(
@@ -129,10 +178,18 @@ def insert_file_change(
 
 def list_recovery_tasks(
     connection: sqlite3.Connection,
-) -> list[tuple[str, str | None]]:
-    return connection.execute(
+) -> list[RecoveryTaskRef]:
+    connection.row_factory = sqlite3.Row
+    rows = connection.execute(
         "SELECT id, snapshot_frozen_at FROM tasks WHERE status = 'finalizing'"
     ).fetchall()
+    return [
+        RecoveryTaskRef(
+            task_id=row["id"],
+            snapshot_frozen_at=row["snapshot_frozen_at"],
+        )
+        for row in rows
+    ]
 
 
 def fail_task(
@@ -161,13 +218,17 @@ def fail_task(
 def fence_finalization(
     connection: sqlite3.Connection, tree_id: str, failed_at: str
 ) -> int:
-    generation = connection.execute(
+    connection.row_factory = sqlite3.Row
+    row = connection.execute(
         "UPDATE working_trees SET capture_generation = capture_generation + 1 "
         "WHERE id = ? RETURNING capture_generation",
         (tree_id,),
     ).fetchone()
-    if generation is None:
+    if row is None:
         raise ValueError("WORKING_TREE_NOT_FOUND")
+    generation = GenerationRef(
+        capture_generation=int(row["capture_generation"])
+    )
     connection.execute(
         "UPDATE tasks SET status = 'failed', "
         "failure_code = 'FINAL_CAPTURE_FENCED_BY_NEXT_INPUT', "
@@ -187,4 +248,4 @@ def fence_finalization(
         "AND failure_code = 'FINAL_CAPTURE_FENCED_BY_NEXT_INPUT')",
         (tree_id,),
     )
-    return int(generation[0])
+    return generation.capture_generation

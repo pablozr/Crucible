@@ -14,7 +14,12 @@ from crucible_core.repositories import finalizations_repository as final_repo
 from crucible_core.repositories import sessions_repository as sessions_repo
 from crucible_core.repositories import tasks_repository as tasks_repo
 from crucible_core.schemas.admissions import EventRequest
-from crucible_core.schemas.persistence import TaskFileChangeRow
+from crucible_core.schemas.persistence import (
+    BaselineFileRow,
+    FinalizationEventRow,
+    FinalizationTask,
+    TaskFileChangeRow,
+)
 from crucible_core.services.projects import resolve_project
 from crucible_core.utils.functions import canonical_json_sha256, utc_now_iso
 
@@ -76,11 +81,7 @@ class FinalizationCoordinator:
         self._validate_event(event)
 
         with connect(self._database_path) as connection:
-            existing = connection.execute(
-                "SELECT payload_hash, status, outcome, input_id, task_id, "
-                "failure_code FROM inbound_events WHERE id = ?",
-                (event_id,),
-            ).fetchone()
+            existing = final_repo.get_finalization_event(connection, event_id)
             if existing is not None:
                 return self._reconcile(event_id, payload_hash, existing)
 
@@ -96,12 +97,9 @@ class FinalizationCoordinator:
             begun = self._begin(event, task_id, payload_hash)
         except sqlite3.IntegrityError:
             with connect(self._database_path) as connection:
-                existing = connection.execute(
-                    "SELECT payload_hash, status, outcome, input_id, "
-                    "task_id, failure_code FROM inbound_events "
-                    "WHERE id = ?",
-                    (event_id,),
-                ).fetchone()
+                existing = final_repo.get_finalization_event(
+                    connection, event_id
+                )
                 if existing is None:
                     raise
                 return self._reconcile(event_id, payload_hash, existing)
@@ -148,15 +146,12 @@ class FinalizationCoordinator:
         event: EventRequest,
         task_id: str,
         payload_hash: str,
-    ) -> tuple[int, Any, str] | dict[str, object]:
+    ) -> tuple[int, FinalizationTask, str] | dict[str, object]:
         with connect(self._database_path) as connection:
             connection.execute("BEGIN IMMEDIATE")
-            duplicate = connection.execute(
-                "SELECT payload_hash, status, outcome, input_id, "
-                "task_id, failure_code FROM inbound_events "
-                "WHERE id = ?",
-                (str(event.event_id),),
-            ).fetchone()
+            duplicate = final_repo.get_finalization_event(
+                connection, str(event.event_id)
+            )
             if duplicate is not None:
                 connection.rollback()
                 return self._reconcile(
@@ -248,11 +243,12 @@ class FinalizationCoordinator:
     def materialize(self, task_id: str) -> None:
         with connect(self._database_path) as connection:
             connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                "SELECT status, snapshot_frozen_at FROM tasks WHERE id = ?",
-                (task_id,),
-            ).fetchone()
-            if row is None or row[0] != "finalizing" or row[1] is None:
+            state = final_repo.get_frozen_task_state(connection, task_id)
+            if (
+                state is None
+                or state.status != "finalizing"
+                or state.snapshot_frozen_at is None
+            ):
                 connection.rollback()
                 return
             baseline = {
@@ -288,15 +284,19 @@ class FinalizationCoordinator:
 
     def recover(self) -> None:
         with connect(self._database_path) as connection:
-            rows = final_repo.list_recovery_tasks(connection)
-        for task_id, frozen_at in rows:
-            if frozen_at is not None:
+            entries = final_repo.list_recovery_tasks(connection)
+        for entry in entries:
+            if entry.snapshot_frozen_at is not None:
                 try:
-                    self.materialize(task_id)
+                    self.materialize(entry.task_id)
                 except Exception:
-                    self._fail(task_id, None, "FINAL_MATERIALIZATION_FAILED")
+                    self._fail(
+                        entry.task_id,
+                        None,
+                        "FINAL_MATERIALIZATION_FAILED",
+                    )
             else:
-                self._fail(task_id, None, "FINAL_SNAPSHOT_NOT_FROZEN")
+                self._fail(entry.task_id, None, "FINAL_SNAPSHOT_NOT_FROZEN")
 
     def fence_unfrozen(self, tree_id: str) -> int:
         with connect(self._database_path) as connection:
@@ -344,7 +344,7 @@ class FinalizationCoordinator:
             raise FinalizationError("UNSUPPORTED_COMPATIBILITY_PROFILE")
 
     def _validate_correlation(
-        self, connection: Any, event: EventRequest, task: Any
+        self, connection: Any, event: EventRequest, task: FinalizationTask
     ) -> None:
         tree_id = sessions_repo.get_working_tree_id(
             connection, str(Path(event.git_root).resolve())
@@ -382,7 +382,9 @@ class FinalizationCoordinator:
                 )
             connection.commit()
 
-    def _patch(self, baseline: Any, change: TaskFileChangeRow) -> str | None:
+    def _patch(
+        self, baseline: BaselineFileRow | None, change: TaskFileChangeRow
+    ) -> str | None:
         if change.evidence_status != "complete":
             return None
         before = (
@@ -408,20 +410,20 @@ class FinalizationCoordinator:
         self,
         event_id: str,
         payload_hash: str,
-        row: tuple[Any, ...],
+        row: FinalizationEventRow,
     ) -> dict[str, object]:
-        if row[0] != payload_hash:
+        if row.payload_hash != payload_hash:
             raise FinalizationError("IDEMPOTENCY_CONFLICT", 409)
-        if row[1] in ("processing", "received"):
+        if row.status in ("processing", "received"):
             raise FinalizationError("FINALIZATION_IN_PROGRESS", 409)
-        if row[1] == "rejected":
-            code = row[5] or "FINALIZATION_REJECTED"
+        if row.status == "rejected":
+            code = row.failure_code or "FINALIZATION_REJECTED"
             raise FinalizationError(code, _replay_status(code))
         return {
             "event_id": event_id,
-            "status": row[1],
-            "outcome": row[2],
-            "input_id": row[3],
-            "task_id": row[4],
+            "status": row.status,
+            "outcome": row.outcome,
+            "input_id": row.input_id,
+            "task_id": row.task_id,
             "dispatch_authorized": False,
         }

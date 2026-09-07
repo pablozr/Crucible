@@ -362,13 +362,20 @@ def list_task_baseline_files(
 def get_finalization_task(
     connection: sqlite3.Connection, task_id: str
 ) -> FinalizationTask | None:
+    connection.row_factory = sqlite3.Row
     row = connection.execute(
-        "SELECT tasks.id, tasks.session_id, tasks.working_tree_id, "
-        "tasks.status, working_trees.git_root, projects.id, "
-        "sessions.adapter, sessions.adapter_version, "
-        "sessions.agent_session_id, sessions.workspace_path, "
-        "tasks.baseline_head, tasks.baseline_branch, "
-        "tasks.baseline_index_manifest, working_trees.capture_generation "
+        "SELECT tasks.id AS id, tasks.session_id AS session_id, "
+        "tasks.working_tree_id AS tree_id, "
+        "tasks.status AS status, working_trees.git_root AS git_root, "
+        "projects.id AS project_id, "
+        "sessions.adapter AS adapter, "
+        "sessions.adapter_version AS adapter_version, "
+        "sessions.agent_session_id AS agent_session_id, "
+        "sessions.workspace_path AS workspace_path, "
+        "tasks.baseline_head AS baseline_head, "
+        "tasks.baseline_branch AS baseline_branch, "
+        "tasks.baseline_index_manifest AS baseline_index_manifest, "
+        "working_trees.capture_generation AS capture_generation "
         "FROM tasks JOIN sessions ON sessions.id = tasks.session_id "
         "JOIN working_trees ON working_trees.id = tasks.working_tree_id "
         "JOIN projects ON projects.id = working_trees.project_id "
@@ -378,26 +385,27 @@ def get_finalization_task(
     if row is None:
         return None
     return FinalizationTask(
-        id=row[0],
-        session_id=row[1],
-        tree_id=row[2],
-        status=row[3],
-        git_root=row[4],
-        project_id=row[5],
-        adapter=row[6],
-        adapter_version=row[7],
-        agent_session_id=row[8],
-        workspace_path=row[9],
-        baseline_head=row[10],
-        baseline_branch=row[11],
-        baseline_index_manifest=row[12],
-        capture_generation=row[13],
+        id=row["id"],
+        session_id=row["session_id"],
+        tree_id=row["tree_id"],
+        status=row["status"],
+        git_root=row["git_root"],
+        project_id=row["project_id"],
+        adapter=row["adapter"],
+        adapter_version=row["adapter_version"],
+        agent_session_id=row["agent_session_id"],
+        workspace_path=row["workspace_path"],
+        baseline_head=row["baseline_head"],
+        baseline_branch=row["baseline_branch"],
+        baseline_index_manifest=row["baseline_index_manifest"],
+        capture_generation=row["capture_generation"],
     )
 
 
 def list_task_file_changes(
     connection: sqlite3.Connection, task_id: str
 ) -> list[TaskFileChangeRow]:
+    connection.row_factory = sqlite3.Row
     rows = connection.execute(
         "SELECT path, operation, final_status, final_sha256, final_size, "
         "final_is_binary, final_content, evidence_status, "
@@ -407,16 +415,16 @@ def list_task_file_changes(
     ).fetchall()
     return [
         TaskFileChangeRow(
-            path=row[0],
-            operation=row[1],
-            final_status=row[2],
-            final_sha256=row[3],
-            final_size=row[4],
-            final_is_binary=row[5],
-            final_content=row[6],
-            evidence_status=row[7],
-            evidence_reason=row[8],
-            patch=row[9],
+            path=row["path"],
+            operation=row["operation"],
+            final_status=row["final_status"],
+            final_sha256=row["final_sha256"],
+            final_size=row["final_size"],
+            final_is_binary=row["final_is_binary"],
+            final_content=row["final_content"],
+            evidence_status=row["evidence_status"],
+            evidence_reason=row["evidence_reason"],
+            patch=row["patch"],
         )
         for row in rows
     ]
