@@ -12,10 +12,21 @@ class Settings:
     data_dir: Path
     host: str = "127.0.0.1"
     port: int = 7331
+    terminal_max_authorization_window_seconds: int | None = None
 
     @property
     def database_path(self) -> Path:
         return self.data_dir / "crucible.db"
+
+
+def _parse_terminal_window(raw: str | None) -> int | None:
+    if raw is None:
+        return None
+    try:
+        parsed = int(raw.strip())
+    except (ValueError, AttributeError):
+        return None
+    return parsed if parsed > 0 else None
 
 
 def load_settings() -> Settings:
@@ -25,4 +36,10 @@ def load_settings() -> Settings:
         if override
         else Path(user_data_path("Crucible", appauthor=False))
     )
-    return Settings(data_dir=data_dir.expanduser().resolve())
+    window = _parse_terminal_window(
+        os.environ.get("CRUCIBLE_TERMINAL_MAX_AUTH_WINDOW_SECONDS")
+    )
+    return Settings(
+        data_dir=data_dir.expanduser().resolve(),
+        terminal_max_authorization_window_seconds=window,
+    )

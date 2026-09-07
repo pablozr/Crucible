@@ -60,6 +60,7 @@ def make_event(
         "adapter_version": "1.0",
         "agent_session_id": session,
         "input_id": input_id,
+        "execution_id": "execution-1",
         "project_id": project_id,
         "git_root": str(root),
         "workspace_path": str(root),
@@ -516,13 +517,14 @@ def test_steer_race_joins_new_task(monkeypatch, tmp_path):
                 race_task_id["id"] = task_id
                 connection.execute(
                     "INSERT INTO tasks (id, session_id, "
-                    "working_tree_id, status, started_at) "
-                    "VALUES (?, ?, ?, 'running', ?)",
+                    "working_tree_id, status, started_at, execution_id) "
+                    "VALUES (?, ?, ?, 'running', ?, ?)",
                     (
                         task_id,
                         session_id,
                         tree_id,
                         "2026-09-06T00:00:00Z",
+                        event.execution_id or "execution-1",
                     ),
                 )
                 connection.commit()
@@ -552,3 +554,128 @@ def test_steer_race_joins_new_task(monkeypatch, tmp_path):
     assert body["task_id"] == race_task_id["id"]
     assert table_count(db_path(tmp_path), "tasks") == 2
     assert table_count(db_path(tmp_path), "inputs") == 2
+
+
+def test_candidate_requires_explicit_execution_id(monkeypatch, tmp_path):
+    monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
+    project_id = initialized_repository(tmp_path / "repo")
+    event = make_event(project_id, tmp_path / "repo")
+    event.pop("execution_id")
+    with TestClient(app) as client:
+        response = client.post("/v1/events", json=event)
+    assert response.status_code == 400
+    assert response.json()["data"]["code"] == "EXECUTION_ID_REQUIRED"
+    assert table_count(db_path(tmp_path), "tasks") == 0
+    assert table_count(db_path(tmp_path), "inputs") == 0
+
+
+def test_new_task_persists_execution_id(monkeypatch, tmp_path):
+    monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
+    project_id = initialized_repository(tmp_path / "repo")
+    with TestClient(app) as client:
+        event = client.post(
+            "/v1/events",
+            json=make_event(project_id, tmp_path / "repo"),
+        ).json()["data"]["event"]
+        detail = client.get(f"/v1/tasks/{event['task_id']}").json()["data"][
+            "task"
+        ]
+    assert detail["execution_id"] == "execution-1"
+    connection = sqlite3.connect(db_path(tmp_path))
+    try:
+        stored = connection.execute(
+            "SELECT execution_id FROM tasks WHERE id = ?",
+            (event["task_id"],),
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert stored == "execution-1"
+
+
+def test_steer_execution_mismatch_is_409(monkeypatch, tmp_path):
+    monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
+    project_id = initialized_repository(tmp_path / "repo")
+    with TestClient(app) as client:
+        first = client.post(
+            "/v1/events",
+            json=make_event(project_id, tmp_path / "repo"),
+        ).json()["data"]["event"]
+        mismatch = make_event(
+            project_id,
+            tmp_path / "repo",
+            delivery="steer",
+            input_id="input-steer",
+        )
+        mismatch["execution_id"] = "execution-other"
+        response = client.post("/v1/events", json=mismatch)
+        detail = client.get(f"/v1/tasks/{first['task_id']}").json()["data"][
+            "task"
+        ]
+    assert response.status_code == 409
+    assert response.json()["data"]["code"] == "EXECUTION_ID_MISMATCH"
+    assert detail["execution_id"] == "execution-1"
+    assert detail["input_ids"] == ["input-1"]
+    assert table_count(db_path(tmp_path), "tasks") == 1
+    assert table_count(db_path(tmp_path), "inputs") == 1
+
+
+def test_same_session_new_execution_mismatch_is_409(monkeypatch, tmp_path):
+    monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
+    project_id = initialized_repository(tmp_path / "repo")
+    with TestClient(app) as client:
+        first = client.post(
+            "/v1/events",
+            json=make_event(project_id, tmp_path / "repo"),
+        ).json()["data"]["event"]
+        mismatch = make_event(
+            project_id,
+            tmp_path / "repo",
+            delivery="new",
+            input_id="input-2",
+        )
+        mismatch["execution_id"] = "execution-other"
+        response = client.post("/v1/events", json=mismatch)
+    assert response.status_code == 409
+    assert response.json()["data"]["code"] == "EXECUTION_ID_MISMATCH"
+    assert table_count(db_path(tmp_path), "tasks") == 1
+    assert table_count(db_path(tmp_path), "inputs") == 1
+    connection = sqlite3.connect(db_path(tmp_path))
+    try:
+        stored = connection.execute(
+            "SELECT execution_id FROM tasks WHERE id = ?",
+            (first["task_id"],),
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert stored == "execution-1"
+
+
+def test_legacy_null_execution_id_cannot_be_joined(monkeypatch, tmp_path):
+    monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
+    project_id = initialized_repository(tmp_path / "repo")
+    with TestClient(app) as client:
+        first = client.post(
+            "/v1/events",
+            json=make_event(project_id, tmp_path / "repo"),
+        ).json()["data"]["event"]
+        connection = sqlite3.connect(db_path(tmp_path))
+        try:
+            connection.execute(
+                "UPDATE tasks SET execution_id = NULL WHERE id = ?",
+                (first["task_id"],),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        for delivery in ("new", "steer"):
+            joined = make_event(
+                project_id,
+                tmp_path / "repo",
+                delivery=delivery,
+                input_id=f"input-{delivery}-legacy",
+            )
+            response = client.post("/v1/events", json=joined)
+            assert response.status_code == 409
+            assert response.json()["data"]["code"] == "EXECUTION_ID_MISMATCH"
+    assert table_count(db_path(tmp_path), "tasks") == 1
+    assert table_count(db_path(tmp_path), "inputs") == 1

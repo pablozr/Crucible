@@ -76,6 +76,8 @@ def begin_finalization(
     terminal_signal: str,
     terminal_outcome: str,
     compatibility_profile: str,
+    terminal_observed_at: str,
+    capture_not_after: str,
 ) -> int | None:
     connection.row_factory = sqlite3.Row
     row = connection.execute(
@@ -91,13 +93,16 @@ def begin_finalization(
     changed = connection.execute(
         "UPDATE tasks SET status = 'finalizing', execution_id = ?, "
         "terminal_signal = ?, terminal_outcome = ?, "
-        "compatibility_profile = ?, capture_generation = ? "
+        "compatibility_profile = ?, terminal_observed_at = ?, "
+        "capture_not_after = ?, capture_generation = ? "
         "WHERE id = ? AND status = 'running'",
         (
             execution_id,
             terminal_signal,
             terminal_outcome,
             compatibility_profile,
+            terminal_observed_at,
+            capture_not_after,
             generation.capture_generation,
             task_id,
         ),
@@ -105,6 +110,49 @@ def begin_finalization(
     if changed == 1:
         return generation.capture_generation
     return None
+
+
+def abort_running_task(
+    connection: sqlite3.Connection,
+    task_id: str,
+    code: str,
+    failed_at: str,
+    terminal_observed_at: str,
+    capture_not_after: str,
+) -> bool:
+    return (
+        connection.execute(
+            "UPDATE tasks SET status = 'failed', failure_code = ?, "
+            "failure_message = ?, failed_at = ?, terminal_observed_at = ?, "
+            "capture_not_after = ? WHERE id = ? AND status = 'running'",
+            (
+                code,
+                code,
+                failed_at,
+                terminal_observed_at,
+                capture_not_after,
+                task_id,
+            ),
+        ).rowcount
+        == 1
+    )
+
+
+def abort_running_task_with_reason(
+    connection: sqlite3.Connection,
+    task_id: str,
+    code: str,
+    failed_at: str,
+) -> bool:
+    return (
+        connection.execute(
+            "UPDATE tasks SET status = 'failed', failure_code = ?, "
+            "failure_message = ?, failed_at = ? "
+            "WHERE id = ? AND status = 'running'",
+            (code, code, failed_at, task_id),
+        ).rowcount
+        == 1
+    )
 
 
 def publication_is_current(

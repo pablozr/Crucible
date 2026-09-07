@@ -17,6 +17,7 @@ function request(overrides = {}) {
     openCodeVersion: "1.18.28",
     agentSessionId: "ses_123",
     messageId: "msg_456",
+    executionId: "msg_456",
     workspacePath: "/repo",
     delivery: "new" as const,
     ...overrides,

@@ -1,9 +1,6 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import type { Delivery } from "../contracts.js";
-
-export const DEFAULT_CORE_URL = "http://127.0.0.1:7331";
-export const DEFAULT_TIMEOUT_MS = 2000;
 
 export type FetchImpl = (
   input: string,
@@ -19,6 +16,22 @@ export type CandidateInput = {
   delivery: Delivery;
   prompt?: string;
   model?: string;
+  executionId?: string;
+};
+
+export const COMPLETION_UNCONFIRMED = "COMPLETION_UNCONFIRMED";
+export const CORE_CONFIGURATION_REQUIRED = "CORE_CONFIGURATION_REQUIRED";
+
+export type CoreConnectionOptions = {
+  fetchImpl: FetchImpl;
+  coreUrl: string;
+  timeoutMs: number;
+};
+
+export type CanonicalCandidate = {
+  eventId: string;
+  envelope: string;
+  payloadHash: string;
 };
 
 export type Admission =
@@ -40,6 +53,55 @@ export type Admission =
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function jsonString(value: string): string {
+  return JSON.stringify(value).replace(/[^\x00-\x7f]/g, (character) =>
+    `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
+  );
+}
+
+export function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (isRecord(value)) {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${jsonString(key)}:${canonicalJson(value[key])}`)
+      .join(",")}}`;
+  }
+  return typeof value === "string" ? jsonString(value) : JSON.stringify(value);
+}
+
+export function createCanonicalCandidate(
+  input: CandidateInput,
+  options: { adapter: string; adapterVersion: string; eventId?: string; occurredAt?: string },
+): CanonicalCandidate {
+  const eventId = options.eventId ?? randomUUID();
+  const payload: Record<string, unknown> = { delivery: input.delivery };
+  if (input.prompt !== undefined) payload["prompt"] = input.prompt;
+  if (input.model !== undefined) payload["model"] = input.model;
+
+  const envelope = canonicalJson({
+    adapter: options.adapter,
+    adapter_version: options.adapterVersion,
+    agent_session_id: input.agentSessionId,
+    event_id: eventId,
+    event_type: "input_candidate",
+    ...(input.executionId ? { execution_id: input.executionId } : {}),
+    git_root: input.gitRoot,
+    input_id: input.messageId,
+    occurred_at: options.occurredAt ?? new Date().toISOString(),
+    payload,
+    payload_version: 1,
+    project_id: input.projectId,
+    workspace_path: input.workspacePath,
+  });
+
+  return {
+    eventId,
+    envelope,
+    payloadHash: createHash("sha256").update(envelope).digest("hex"),
+  };
 }
 
 function asEventAdmission(
@@ -123,45 +185,39 @@ export async function postInputCandidate(
     eventId?: string;
   },
 ): Promise<Admission> {
-  const eventId = options.eventId ?? randomUUID();
-  const coreUrl = options.coreUrl ?? DEFAULT_CORE_URL;
-  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const fetchImpl = options.fetchImpl;
+  const candidate = createCanonicalCandidate(input, options);
+  return postCanonicalCandidate(candidate, options);
+}
 
-  const payload: Record<string, unknown> = { delivery: input.delivery };
-
-  if (input.prompt !== undefined) {
-    payload["prompt"] = input.prompt;
+export async function postCanonicalCandidate(
+  candidate: CanonicalCandidate,
+  options: {
+    fetchImpl: FetchImpl;
+    coreUrl?: string;
+    timeoutMs?: number;
+  },
+): Promise<Admission> {
+  const { eventId, envelope } = candidate;
+  if (!options.coreUrl || !options.timeoutMs) {
+    return {
+      tracked: false,
+      outcome: "tracking_skipped",
+      diagnostic: CORE_CONFIGURATION_REQUIRED,
+      taskId: null,
+      inputId: null,
+      eventId,
+    };
   }
-
-  if (input.model !== undefined) {
-    payload["model"] = input.model;
-  }
-
-  const body = {
-    event_id: eventId,
-    event_type: "input_candidate",
-    occurred_at: new Date().toISOString(),
-    payload_version: 1,
-    adapter: options.adapter,
-    adapter_version: options.adapterVersion,
-    agent_session_id: input.agentSessionId,
-    input_id: input.messageId,
-    project_id: input.projectId,
-    git_root: input.gitRoot,
-    workspace_path: input.workspacePath,
-    payload,
-  };
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const timer = setTimeout(() => controller.abort(), options.timeoutMs);
   let response: Response;
 
   try {
-    response = await fetchImpl(`${coreUrl}/v1/events`, {
+    response = await options.fetchImpl(`${options.coreUrl}/v1/events`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
+      body: envelope,
       signal: controller.signal,
     });
   } catch {
@@ -223,4 +279,48 @@ export async function postInputCandidate(
   }
 
   return errorAdmission;
+}
+
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  options: CoreConnectionOptions,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), options.timeoutMs);
+  try {
+    return await options.fetchImpl(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export async function postCanonicalEvent(
+  canonicalEnvelope: string,
+  options: CoreConnectionOptions,
+): Promise<unknown> {
+  const response = await fetchWithTimeout(
+    `${options.coreUrl}/v1/events`,
+    { method: "POST", headers: { "content-type": "application/json" }, body: canonicalEnvelope },
+    options,
+  );
+  return response.json();
+}
+
+export async function getEvent(
+  eventId: string,
+  options: CoreConnectionOptions,
+): Promise<{ status: number; body: unknown }> {
+  const response = await fetchWithTimeout(
+    `${options.coreUrl}/v1/events/${eventId}`,
+    { method: "GET" },
+    options,
+  );
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    body = undefined;
+  }
+  return { status: response.status, body };
 }

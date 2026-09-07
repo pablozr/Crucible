@@ -27,7 +27,7 @@ from crucible_core.services.admissions import (
     get_task,
     list_tasks,
 )
-from crucible_core.services.finalizations import complete_event
+from crucible_core.services.finalizations import abort_event, complete_event
 
 router = APIRouter()
 
@@ -45,6 +45,12 @@ def post_event(
             )
         elif event.event_type == "task_completed":
             result = complete_event(
+                request.app.state.settings.database_path,
+                event,
+                request.app.state.settings.terminal_max_authorization_window_seconds,
+            )
+        elif event.event_type == "task_finalization_aborted":
+            result = abort_event(
                 request.app.state.settings.database_path, event
             )
         else:

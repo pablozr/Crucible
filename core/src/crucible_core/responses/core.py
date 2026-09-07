@@ -25,12 +25,26 @@ ERROR_MESSAGES = {
         "Use the session from its original checkout."
     ),
     "EXECUTION_ID_REQUIRED": "A confirmed execution ID is required.",
+    "EXECUTION_ID_MISMATCH": "Execution does not match the active task.",
     "TASK_ID_REQUIRED": "A task ID is required.",
     "TASK_NOT_RUNNING": "Task is not running.",
     "INPUT_TASK_MISMATCH": "Input does not belong to this task.",
     "TASK_CORRELATION_MISMATCH": "Task completion correlation failed.",
     "INVALID_TERMINAL_SIGNAL": "Terminal signal is not supported.",
     "INVALID_TERMINAL_OUTCOME": "Terminal outcome is not supported.",
+    "INVALID_TERMINAL_OBSERVED_AT": "Terminal observed time is invalid.",
+    "INVALID_CAPTURE_NOT_AFTER": "Capture deadline is invalid.",
+    "INVALID_CAPTURE_WINDOW": "Capture window is invalid.",
+    "INVALID_ABORT_REASON": "Abort reason is not supported.",
+    "DISPATCH_FAILED": "Dispatch failed before terminal observation.",
+    "TERMINAL_OBSERVER_FAILED": "Terminal observation failed.",
+    "TERMINAL_SIGNAL_MISMATCH": (
+        "Terminal signal did not match the active execution."
+    ),
+    "CAPTURE_AUTHORIZATION_EXPIRED": "Capture authorization expired.",
+    "TERMINAL_AUTHORIZATION_UNCONFIGURED": (
+        "Terminal authorization window is not configured."
+    ),
     "UNSUPPORTED_COMPATIBILITY_PROFILE": (
         "Compatibility profile is not supported."
     ),

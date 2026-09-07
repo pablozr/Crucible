@@ -361,6 +361,7 @@ test("live 1.18.28 admission/steer/overlap transport probe", { skip: !LIVE }, as
     const admitted = await dispatchOpenCodeV1(
       {
         openCodeVersion: SUPPORTED,
+        executionId: inputA,
         agentSessionId: agentSession,
         messageId: inputA,
         workspacePath: repo,
@@ -419,6 +420,7 @@ test("live 1.18.28 admission/steer/overlap transport probe", { skip: !LIVE }, as
     const steered = await dispatchOpenCodeV1(
       {
         openCodeVersion: SUPPORTED,
+        executionId: inputS,
         agentSessionId: agentSession,
         messageId: inputS,
         workspacePath: repo,
@@ -480,6 +482,7 @@ test("live 1.18.28 admission/steer/overlap transport probe", { skip: !LIVE }, as
     const overlapped = await dispatchOpenCodeV1(
       {
         openCodeVersion: SUPPORTED,
+        executionId: inputO,
         agentSessionId: overlapSession,
         messageId: inputO,
         workspacePath: repo,

@@ -75,7 +75,14 @@ export async function runTrackedDispatch<T>(
     return { ...context, dispatchResult };
   }
 
-  const admission = await plan.postCandidate(project);
+  let admission: Admission;
+  try {
+    admission = await plan.postCandidate(project);
+  } catch (error) {
+    const context = skippedContext(errorCode(error, "ADAPTER_TRACKING_FAILURE"), plan.eventId);
+    const dispatchResult = await dependencies.dispatch(context);
+    return { ...context, dispatchResult };
+  }
   const context = toDispatchContext(admission);
 
   const dispatchResult = await dependencies.dispatch(context);

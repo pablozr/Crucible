@@ -31,6 +31,8 @@ function options(overrides = {}) {
     adapter: ADAPTER,
     adapterVersion: ADAPTER_VERSION,
     eventId: EVENT_ID,
+    coreUrl: "http://core.test",
+    timeoutMs: 2000,
     ...overrides,
   };
 }

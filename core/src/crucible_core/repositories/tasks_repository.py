@@ -54,17 +54,23 @@ def get_task_status(
 def get_task_owner(
     connection: sqlite3.Connection, task_id: str
 ) -> TaskOwnerRef | None:
+    connection.row_factory = sqlite3.Row
     row = connection.execute(
-        "SELECT session_id, working_tree_id, status FROM tasks WHERE id = ?",
+        "SELECT session_id, working_tree_id, status, execution_id "
+        "FROM tasks WHERE id = ?",
         (task_id,),
     ).fetchone()
     if row is None:
         return None
-    session_id, tree_id, status = row
     return TaskOwnerRef(
-        session_id=str(session_id),
-        tree_id=str(tree_id),
-        status=str(status),
+        session_id=str(row["session_id"]),
+        tree_id=str(row["working_tree_id"]),
+        status=str(row["status"]),
+        execution_id=(
+            str(row["execution_id"])
+            if row["execution_id"] is not None
+            else None
+        ),
     )
 
 
@@ -145,14 +151,16 @@ def insert_task(connection: sqlite3.Connection, task: NewTask) -> None:
     connection.execute(
         "INSERT INTO tasks (id, session_id, working_tree_id, "
         "status, "
-        "started_at, baseline_head, baseline_status, baseline_branch, "
+        "started_at, execution_id, baseline_head, baseline_status, "
+        "baseline_branch, "
         "baseline_index_manifest) VALUES "
-        "(?, ?, ?, 'running', ?, ?, ?, ?, ?)",
+        "(?, ?, ?, 'running', ?, ?, ?, ?, ?, ?)",
         (
             task.task_id,
             task.session_id,
             task.tree_id,
             task.started_at,
+            task.execution_id,
             task.baseline_head,
             task.baseline_status,
             task.baseline_branch,
@@ -231,18 +239,32 @@ def list_inputs_by_task_ids(
 def get_task_row(
     connection: sqlite3.Connection, task_id: str
 ) -> TaskDetailRow | None:
+    connection.row_factory = sqlite3.Row
     row = connection.execute(
-        "SELECT tasks.id, tasks.status, tasks.started_at, "
-        "working_trees.git_root, "
-        "projects.id, tasks.baseline_branch, tasks.baseline_head, "
-        "tasks.baseline_status, tasks.baseline_index_manifest, "
-        "tasks.failure_code, "
-        "tasks.failure_message, tasks.final_head, tasks.final_branch, "
-        "tasks.final_status, tasks.final_index_manifest, "
-        "tasks.snapshot_frozen_at, tasks.task_diff, "
-        "tasks.evidence_completeness, tasks.execution_id, "
-        "tasks.terminal_signal, tasks.terminal_outcome, "
-        "tasks.compatibility_profile FROM tasks JOIN working_trees ON "
+        "SELECT tasks.id AS id, tasks.status AS status, "
+        "tasks.started_at AS started_at, "
+        "working_trees.git_root AS git_root, "
+        "projects.id AS project_id, "
+        "tasks.baseline_branch AS baseline_branch, "
+        "tasks.baseline_head AS baseline_head, "
+        "tasks.baseline_status AS baseline_status, "
+        "tasks.baseline_index_manifest AS baseline_index_manifest, "
+        "tasks.failure_code AS failure_code, "
+        "tasks.failure_message AS failure_message, "
+        "tasks.final_head AS final_head, "
+        "tasks.final_branch AS final_branch, "
+        "tasks.final_status AS final_status, "
+        "tasks.final_index_manifest AS final_index_manifest, "
+        "tasks.snapshot_frozen_at AS snapshot_frozen_at, "
+        "tasks.task_diff AS task_diff, "
+        "tasks.evidence_completeness AS evidence_completeness, "
+        "tasks.execution_id AS execution_id, "
+        "tasks.terminal_signal AS terminal_signal, "
+        "tasks.terminal_outcome AS terminal_outcome, "
+        "tasks.compatibility_profile AS compatibility_profile, "
+        "tasks.terminal_observed_at AS terminal_observed_at, "
+        "tasks.capture_not_after AS capture_not_after "
+        "FROM tasks JOIN working_trees ON "
         "working_trees.id = tasks.working_tree_id JOIN projects ON "
         "projects.id = "
         "working_trees.project_id WHERE tasks.id = ?",
@@ -251,54 +273,31 @@ def get_task_row(
     if row is None:
         return None
 
-    (
-        row_id,
-        status,
-        started_at,
-        worktree,
-        project_id,
-        branch,
-        head,
-        baseline_status,
-        index_manifest,
-        failure_code,
-        failure_message,
-        final_head,
-        final_branch,
-        final_status,
-        final_index_manifest,
-        snapshot_frozen_at,
-        task_diff,
-        evidence_completeness,
-        execution_id,
-        terminal_signal,
-        terminal_outcome,
-        compatibility_profile,
-    ) = row
-
     return TaskDetailRow(
-        id=row_id,
-        status=status,
-        started_at=started_at,
-        worktree=worktree,
-        project_id=project_id,
-        branch=branch,
-        baseline_head=head,
-        baseline_status=baseline_status,
-        baseline_index_manifest=index_manifest,
-        failure_code=failure_code,
-        failure_message=failure_message,
-        final_head=final_head,
-        final_branch=final_branch,
-        final_status=final_status,
-        final_index_manifest=final_index_manifest,
-        snapshot_frozen_at=snapshot_frozen_at,
-        task_diff=task_diff,
-        evidence_completeness=evidence_completeness,
-        execution_id=execution_id,
-        terminal_signal=terminal_signal,
-        terminal_outcome=terminal_outcome,
-        compatibility_profile=compatibility_profile,
+        id=row["id"],
+        status=row["status"],
+        started_at=row["started_at"],
+        worktree=row["git_root"],
+        project_id=row["project_id"],
+        branch=row["baseline_branch"],
+        baseline_head=row["baseline_head"],
+        baseline_status=row["baseline_status"],
+        baseline_index_manifest=row["baseline_index_manifest"],
+        failure_code=row["failure_code"],
+        failure_message=row["failure_message"],
+        final_head=row["final_head"],
+        final_branch=row["final_branch"],
+        final_status=row["final_status"],
+        final_index_manifest=row["final_index_manifest"],
+        snapshot_frozen_at=row["snapshot_frozen_at"],
+        task_diff=row["task_diff"],
+        evidence_completeness=row["evidence_completeness"],
+        execution_id=row["execution_id"],
+        terminal_signal=row["terminal_signal"],
+        terminal_outcome=row["terminal_outcome"],
+        compatibility_profile=row["compatibility_profile"],
+        terminal_observed_at=row["terminal_observed_at"],
+        capture_not_after=row["capture_not_after"],
     )
 
 
@@ -375,7 +374,10 @@ def get_finalization_task(
         "tasks.baseline_head AS baseline_head, "
         "tasks.baseline_branch AS baseline_branch, "
         "tasks.baseline_index_manifest AS baseline_index_manifest, "
-        "working_trees.capture_generation AS capture_generation "
+        "working_trees.capture_generation AS capture_generation, "
+        "tasks.execution_id AS execution_id, "
+        "tasks.terminal_observed_at AS terminal_observed_at, "
+        "tasks.capture_not_after AS capture_not_after "
         "FROM tasks JOIN sessions ON sessions.id = tasks.session_id "
         "JOIN working_trees ON working_trees.id = tasks.working_tree_id "
         "JOIN projects ON projects.id = working_trees.project_id "
@@ -399,6 +401,9 @@ def get_finalization_task(
         baseline_branch=row["baseline_branch"],
         baseline_index_manifest=row["baseline_index_manifest"],
         capture_generation=row["capture_generation"],
+        execution_id=row["execution_id"],
+        terminal_observed_at=row["terminal_observed_at"],
+        capture_not_after=row["capture_not_after"],
     )
 
 

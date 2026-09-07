@@ -72,6 +72,16 @@ class AdmissionCoordinator:
         if tree_id is None or found.tree_id != tree_id:
             raise AdmissionError("SESSION_WORKTREE_MISMATCH", 409)
 
+    def _require_execution_match(
+        self, stored_execution_id: str | None, event: EventRequest
+    ) -> None:
+        if (
+            not stored_execution_id
+            or not event.execution_id
+            or stored_execution_id != event.execution_id
+        ):
+            raise AdmissionError("EXECUTION_ID_MISMATCH", 409)
+
     def _fence_unfrozen_finalization_locked(
         self,
         connection: sqlite3.Connection,
@@ -207,6 +217,7 @@ class AdmissionCoordinator:
                 "IDEMPOTENCY_CONFLICT",
                 "STEER_WITHOUT_ACTIVE_TASK",
                 "SESSION_WORKTREE_MISMATCH",
+                "EXECUTION_ID_MISMATCH",
             ):
                 raise
             logger.warning(
@@ -295,6 +306,13 @@ class AdmissionCoordinator:
                 connection.rollback()
                 if stored_input.admission_hash != self._admission_hash(event):
                     raise AdmissionError("IDEMPOTENCY_CONFLICT", 409)
+                stored_owner = tasks_repo.get_task_owner(
+                    connection, stored_input.task_id
+                )
+                self._require_execution_match(
+                    stored_owner.execution_id if stored_owner else None,
+                    event,
+                )
                 return self._replay_admitted_input(
                     event, event_id, stored_input
                 )
@@ -463,6 +481,7 @@ class AdmissionCoordinator:
                         session_id=session_id,
                         tree_id=tree_id,
                         started_at=now,
+                        execution_id=event.execution_id or "",
                         baseline_head=candidate.baseline_head,
                         baseline_status=candidate.baseline_status,
                         baseline_branch=candidate.baseline_branch,
@@ -623,6 +642,8 @@ class AdmissionCoordinator:
             raise AdmissionError("UNKNOWN_EVENT_TYPE")
         if event.payload_version != 1:
             raise AdmissionError("UNSUPPORTED_PAYLOAD_VERSION")
+        if not event.execution_id:
+            raise AdmissionError("EXECUTION_ID_REQUIRED")
         if event.payload.get("delivery") not in ("new", "steer"):
             raise AdmissionError("UNSUPPORTED_DELIVERY")
         if (
@@ -741,6 +762,13 @@ class AdmissionCoordinator:
                         event
                     ):
                         raise AdmissionError("IDEMPOTENCY_CONFLICT", 409)
+                    stored_owner = tasks_repo.get_task_owner(
+                        connection, stored_input.task_id
+                    )
+                    self._require_execution_match(
+                        stored_owner.execution_id if stored_owner else None,
+                        event,
+                    )
                     if takeover_processing:
                         admissions_repo.mark_event_accepted(
                             connection,
@@ -809,6 +837,7 @@ class AdmissionCoordinator:
                         deadline,
                         depth + 1,
                     )
+                self._require_execution_match(owner.execution_id, event)
                 input_id = str(uuid.uuid4())
                 tasks_repo.insert_input(
                     connection,
@@ -1040,6 +1069,13 @@ class AdmissionCoordinator:
             if stored is not None:
                 if stored.admission_hash != self._admission_hash(event):
                     raise AdmissionError("IDEMPOTENCY_CONFLICT", 409)
+                stored_owner = tasks_repo.get_task_owner(
+                    connection, stored.task_id
+                )
+                self._require_execution_match(
+                    stored_owner.execution_id if stored_owner else None,
+                    event,
+                )
                 try:
                     admissions_repo.insert_accepted_event(
                         connection,
@@ -1254,6 +1290,13 @@ class AdmissionCoordinator:
                         event
                     ):
                         raise AdmissionError("IDEMPOTENCY_CONFLICT", 409)
+                    stored_owner = tasks_repo.get_task_owner(
+                        connection, stored_input.task_id
+                    )
+                    self._require_execution_match(
+                        stored_owner.execution_id if stored_owner else None,
+                        event,
+                    )
                     return self._replay_admitted_input(
                         event, event_id, stored_input
                     )
@@ -1398,6 +1441,13 @@ class AdmissionCoordinator:
                 connection.rollback()
                 if stored_input.admission_hash != self._admission_hash(event):
                     raise AdmissionError("IDEMPOTENCY_CONFLICT", 409)
+                stored_owner = tasks_repo.get_task_owner(
+                    connection, stored_input.task_id
+                )
+                self._require_execution_match(
+                    stored_owner.execution_id if stored_owner else None,
+                    event,
+                )
                 return self._replay_admitted_input(
                     event, event_id, stored_input
                 )

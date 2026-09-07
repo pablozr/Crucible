@@ -135,6 +135,8 @@ def task_detail(
         terminal_signal=row.terminal_signal,
         terminal_outcome=row.terminal_outcome,
         compatibility_profile=row.compatibility_profile,
+        terminal_observed_at=row.terminal_observed_at,
+        capture_not_after=row.capture_not_after,
         file_changes=[
             TaskFileChange(
                 path=item.path,

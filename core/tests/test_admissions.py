@@ -52,6 +52,7 @@ def candidate(project_id, root, event_id=None):
         "adapter_version": "1.0",
         "agent_session_id": "session-1",
         "input_id": "input-1",
+        "execution_id": "execution-1",
         "project_id": project_id,
         "git_root": str(root),
         "workspace_path": str(root),

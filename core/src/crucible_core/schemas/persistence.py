@@ -53,6 +53,7 @@ class TaskOwnerRef(BaseModel):
     session_id: str
     tree_id: str
     status: str
+    execution_id: str | None = None
 
 
 class FinalizationEventRow(BaseModel):
@@ -93,6 +94,9 @@ class FinalizationTask(BaseModel):
     baseline_branch: str
     baseline_index_manifest: bytes
     capture_generation: int
+    execution_id: str | None = None
+    terminal_observed_at: str | None = None
+    capture_not_after: str | None = None
 
 
 class TaskFileChangeRow(BaseModel):
@@ -149,6 +153,8 @@ class TaskDetailRow(TaskPageRow):
     terminal_signal: str | None = None
     terminal_outcome: str | None = None
     compatibility_profile: str | None = None
+    terminal_observed_at: str | None = None
+    capture_not_after: str | None = None
 
 
 class TaskInputLink(BaseModel):
@@ -187,6 +193,7 @@ class NewTask(BaseModel):
     session_id: str
     tree_id: str
     started_at: str
+    execution_id: str
     baseline_head: bytes | str | None = None
     baseline_status: bytes | None = None
     baseline_branch: str | None = None

@@ -89,6 +89,8 @@ class TaskDetail(TaskSummary):
     terminal_signal: str | None = None
     terminal_outcome: str | None = None
     compatibility_profile: str | None = None
+    terminal_observed_at: str | None = None
+    capture_not_after: str | None = None
     file_changes: list[TaskFileChange]
 
 
