@@ -17,6 +17,7 @@
   },
   "scripts": {
     "build": "tsc --project tsconfig.build.json",
+    "probe:sol-04": "tsx --test test/sol-04-final-next-gate.test.ts",
     "test": "tsx --test test/**/*.test.ts",
     "typecheck": "tsc --noEmit"
   }
