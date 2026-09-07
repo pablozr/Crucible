@@ -191,7 +191,7 @@ def expire_processing_events(connection: sqlite3.Connection) -> None:
         "outcome = 'rejected', "
         "failure_code = 'CANDIDATE_EXPIRED', "
         "failure_message = 'CANDIDATE_EXPIRED' "
-        "WHERE status = 'processing'"
+        "WHERE status = 'processing' AND event_type = 'input_candidate'"
     )
 
 

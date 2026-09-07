@@ -4,7 +4,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Query, Request
 
-from crucible_core.core.errors import ProblemError
+from crucible_core.core.errors import FinalizationError, ProblemError
 from crucible_core.logging import get_logger
 from crucible_core.schemas.admissions import (
     EventDetail,
@@ -27,6 +27,7 @@ from crucible_core.services.admissions import (
     get_task,
     list_tasks,
 )
+from crucible_core.services.finalizations import complete_event
 
 router = APIRouter()
 
@@ -38,8 +39,17 @@ def post_event(
     request: Request, event: EventRequest
 ) -> ResponseEnvelope[EventData]:
     try:
-        result = admit_event(request.app.state.settings.database_path, event)
-    except AdmissionError as error:
+        if event.event_type == "input_candidate":
+            result = admit_event(
+                request.app.state.settings.database_path, event
+            )
+        elif event.event_type == "task_completed":
+            result = complete_event(
+                request.app.state.settings.database_path, event
+            )
+        else:
+            raise AdmissionError("UNKNOWN_EVENT_TYPE")
+    except (AdmissionError, FinalizationError) as error:
         logger.warning(
             "admission error code=%s status=%s event_id=%s",
             error.code,

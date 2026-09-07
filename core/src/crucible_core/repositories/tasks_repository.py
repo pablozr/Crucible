@@ -5,11 +5,13 @@ import sqlite3
 from crucible_core.schemas.persistence import (
     ActiveTaskRef,
     BaselineFileRow,
+    FinalizationTask,
     InputRef,
     NewStoredInput,
     NewTask,
     StoredInput,
     TaskDetailRow,
+    TaskFileChangeRow,
     TaskInputLink,
     TaskOwnerRef,
     TaskPageRow,
@@ -235,7 +237,12 @@ def get_task_row(
         "projects.id, tasks.baseline_branch, tasks.baseline_head, "
         "tasks.baseline_status, tasks.baseline_index_manifest, "
         "tasks.failure_code, "
-        "tasks.failure_message FROM tasks JOIN working_trees ON "
+        "tasks.failure_message, tasks.final_head, tasks.final_branch, "
+        "tasks.final_status, tasks.final_index_manifest, "
+        "tasks.snapshot_frozen_at, tasks.task_diff, "
+        "tasks.evidence_completeness, tasks.execution_id, "
+        "tasks.terminal_signal, tasks.terminal_outcome, "
+        "tasks.compatibility_profile FROM tasks JOIN working_trees ON "
         "working_trees.id = tasks.working_tree_id JOIN projects ON "
         "projects.id = "
         "working_trees.project_id WHERE tasks.id = ?",
@@ -256,6 +263,17 @@ def get_task_row(
         index_manifest,
         failure_code,
         failure_message,
+        final_head,
+        final_branch,
+        final_status,
+        final_index_manifest,
+        snapshot_frozen_at,
+        task_diff,
+        evidence_completeness,
+        execution_id,
+        terminal_signal,
+        terminal_outcome,
+        compatibility_profile,
     ) = row
 
     return TaskDetailRow(
@@ -270,6 +288,17 @@ def get_task_row(
         baseline_index_manifest=index_manifest,
         failure_code=failure_code,
         failure_message=failure_message,
+        final_head=final_head,
+        final_branch=final_branch,
+        final_status=final_status,
+        final_index_manifest=final_index_manifest,
+        snapshot_frozen_at=snapshot_frozen_at,
+        task_diff=task_diff,
+        evidence_completeness=evidence_completeness,
+        execution_id=execution_id,
+        terminal_signal=terminal_signal,
+        terminal_outcome=terminal_outcome,
+        compatibility_profile=compatibility_profile,
     )
 
 
@@ -327,4 +356,67 @@ def list_task_baseline_files(
             content=content,
         )
         for path, status, sha256, size, is_binary, content in rows
+    ]
+
+
+def get_finalization_task(
+    connection: sqlite3.Connection, task_id: str
+) -> FinalizationTask | None:
+    row = connection.execute(
+        "SELECT tasks.id, tasks.session_id, tasks.working_tree_id, "
+        "tasks.status, working_trees.git_root, projects.id, "
+        "sessions.adapter, sessions.adapter_version, "
+        "sessions.agent_session_id, sessions.workspace_path, "
+        "tasks.baseline_head, tasks.baseline_branch, "
+        "tasks.baseline_index_manifest, working_trees.capture_generation "
+        "FROM tasks JOIN sessions ON sessions.id = tasks.session_id "
+        "JOIN working_trees ON working_trees.id = tasks.working_tree_id "
+        "JOIN projects ON projects.id = working_trees.project_id "
+        "WHERE tasks.id = ?",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return FinalizationTask(
+        id=row[0],
+        session_id=row[1],
+        tree_id=row[2],
+        status=row[3],
+        git_root=row[4],
+        project_id=row[5],
+        adapter=row[6],
+        adapter_version=row[7],
+        agent_session_id=row[8],
+        workspace_path=row[9],
+        baseline_head=row[10],
+        baseline_branch=row[11],
+        baseline_index_manifest=row[12],
+        capture_generation=row[13],
+    )
+
+
+def list_task_file_changes(
+    connection: sqlite3.Connection, task_id: str
+) -> list[TaskFileChangeRow]:
+    rows = connection.execute(
+        "SELECT path, operation, final_status, final_sha256, final_size, "
+        "final_is_binary, final_content, evidence_status, "
+        "evidence_reason, patch FROM task_file_changes "
+        "WHERE task_id = ? ORDER BY path",
+        (task_id,),
+    ).fetchall()
+    return [
+        TaskFileChangeRow(
+            path=row[0],
+            operation=row[1],
+            final_status=row[2],
+            final_sha256=row[3],
+            final_size=row[4],
+            final_is_binary=row[5],
+            final_content=row[6],
+            evidence_status=row[7],
+            evidence_reason=row[8],
+            patch=row[9],
+        )
+        for row in rows
     ]

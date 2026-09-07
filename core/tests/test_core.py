@@ -28,7 +28,7 @@ def test_health_and_status(monkeypatch, tmp_path):
     }
     assert status.json()["data"]["system"]["database"] == {
         "path": str(tmp_path / "crucible.db"),
-        "migration_revision": "0004",
+        "migration_revision": "0005",
         "journal_mode": "wal",
         "synchronous": "full",
         "foreign_keys": True,
@@ -143,7 +143,8 @@ def test_database_enforces_active_task_constraint(monkeypatch, tmp_path):
     connection.executescript(
         """
         INSERT INTO projects VALUES ('project', '/repo');
-        INSERT INTO working_trees VALUES ('tree', 'project', '/repo');
+        INSERT INTO working_trees (id, project_id, git_root)
+        VALUES ('tree', 'project', '/repo');
         INSERT INTO sessions (id, working_tree_id, adapter, agent_session_id)
         VALUES ('session', 'tree', 'adapter', 'session');
         INSERT INTO tasks (id, session_id, working_tree_id, status)

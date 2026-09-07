@@ -7,6 +7,7 @@ from crucible_core.schemas.admissions import (
     EventDetail,
     EventResponse,
     TaskDetail,
+    TaskFileChange,
     TaskSummary,
 )
 from crucible_core.schemas.persistence import (
@@ -14,6 +15,7 @@ from crucible_core.schemas.persistence import (
     InboundEvent,
     InboundEventDetail,
     TaskDetailRow,
+    TaskFileChangeRow,
     TaskPageRow,
 )
 
@@ -80,6 +82,7 @@ def task_detail(
     row: TaskDetailRow,
     input_ids: list[str],
     files: list[BaselineFileRow],
+    changes: list[TaskFileChangeRow],
 ) -> TaskDetail:
     return TaskDetail(
         id=row.id,
@@ -114,5 +117,38 @@ def task_detail(
                 else None,
             )
             for item in files
+        ],
+        final_head=row.final_head,
+        final_branch=row.final_branch,
+        final_status=base64.b64encode(row.final_status).decode()
+        if row.final_status
+        else None,
+        final_index_manifest=(
+            base64.b64encode(row.final_index_manifest).decode()
+            if row.final_index_manifest
+            else None
+        ),
+        snapshot_frozen_at=row.snapshot_frozen_at,
+        task_diff=row.task_diff,
+        evidence_completeness=row.evidence_completeness,
+        execution_id=row.execution_id,
+        terminal_signal=row.terminal_signal,
+        terminal_outcome=row.terminal_outcome,
+        compatibility_profile=row.compatibility_profile,
+        file_changes=[
+            TaskFileChange(
+                path=item.path,
+                operation=item.operation,
+                final_status=item.final_status,
+                final_sha256=item.final_sha256,
+                final_size=item.final_size,
+                final_is_binary=bool(item.final_is_binary)
+                if item.final_is_binary is not None
+                else None,
+                evidence_status=item.evidence_status,
+                evidence_reason=item.evidence_reason,
+                patch=item.patch,
+            )
+            for item in changes
         ],
     )

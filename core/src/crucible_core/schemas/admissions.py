@@ -60,12 +60,36 @@ class BaselineFile(BaseModel):
     content: str | None = None
 
 
+class TaskFileChange(BaseModel):
+    path: str
+    operation: str | None = None
+    final_status: str
+    final_sha256: str | None = None
+    final_size: int | None = None
+    final_is_binary: bool | None = None
+    evidence_status: str
+    evidence_reason: str | None = None
+    patch: str | None = None
+
+
 class TaskDetail(TaskSummary):
     baseline_head: str | None = None
     baseline_status: str | None = None
     baseline_index_manifest: str | None = None
     input_ids: list[str]
     baseline_files: list[BaselineFile]
+    final_head: str | None = None
+    final_branch: str | None = None
+    final_status: str | None = None
+    final_index_manifest: str | None = None
+    snapshot_frozen_at: str | None = None
+    task_diff: str | None = None
+    evidence_completeness: str | None = None
+    execution_id: str | None = None
+    terminal_signal: str | None = None
+    terminal_outcome: str | None = None
+    compatibility_profile: str | None = None
+    file_changes: list[TaskFileChange]
 
 
 class TaskList(BaseModel):

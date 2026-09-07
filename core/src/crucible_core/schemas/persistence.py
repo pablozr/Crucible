@@ -55,6 +55,36 @@ class TaskOwnerRef(BaseModel):
     status: str
 
 
+class FinalizationTask(BaseModel):
+    id: str
+    session_id: str
+    tree_id: str
+    status: str
+    git_root: str
+    project_id: str
+    adapter: str
+    adapter_version: str | None = None
+    agent_session_id: str
+    workspace_path: str | None = None
+    baseline_head: str
+    baseline_branch: str
+    baseline_index_manifest: bytes
+    capture_generation: int
+
+
+class TaskFileChangeRow(BaseModel):
+    path: str
+    operation: str | None = None
+    final_status: str
+    final_sha256: str | None = None
+    final_size: int | None = None
+    final_is_binary: int | None = None
+    final_content: bytes | None = None
+    evidence_status: str
+    evidence_reason: str | None = None
+    patch: str | None = None
+
+
 class BaselineFileRow(BaseModel):
     path: str
     status: str
@@ -85,6 +115,17 @@ class TaskDetailRow(TaskPageRow):
     baseline_head: bytes | str | None = None
     baseline_status: bytes | None = None
     baseline_index_manifest: bytes | None = None
+    final_head: str | None = None
+    final_branch: str | None = None
+    final_status: bytes | None = None
+    final_index_manifest: bytes | None = None
+    snapshot_frozen_at: str | None = None
+    task_diff: str | None = None
+    evidence_completeness: str | None = None
+    execution_id: str | None = None
+    terminal_signal: str | None = None
+    terminal_outcome: str | None = None
+    compatibility_profile: str | None = None
 
 
 class TaskInputLink(BaseModel):

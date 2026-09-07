@@ -12,6 +12,7 @@ from crucible_core.core.database import connect
 from crucible_core.core.errors import AdmissionError, ProjectError
 from crucible_core.logging import get_logger
 from crucible_core.repositories import admissions_repository as admissions_repo
+from crucible_core.repositories import finalizations_repository as final_repo
 from crucible_core.repositories import sessions_repository as sessions_repo
 from crucible_core.repositories import tasks_repository as tasks_repo
 from crucible_core.responses.admissions import (
@@ -70,6 +71,24 @@ class AdmissionCoordinator:
             return
         if tree_id is None or found.tree_id != tree_id:
             raise AdmissionError("SESSION_WORKTREE_MISMATCH", 409)
+
+    def _fence_unfrozen_finalization_locked(
+        self,
+        connection: sqlite3.Connection,
+        tree_id: str | None,
+        now: str,
+    ) -> None:
+        if tree_id is None:
+            return
+        unfrozen = connection.execute(
+            "SELECT 1 FROM tasks WHERE working_tree_id = ? "
+            "AND status = 'finalizing' "
+            "AND snapshot_frozen_at IS NULL LIMIT 1",
+            (tree_id,),
+        ).fetchone()
+        if unfrozen is None:
+            return
+        final_repo.fence_finalization(connection, tree_id, now)
 
     def admit(self, event: EventRequest) -> dict[str, object]:
         event_id = str(event.event_id)
@@ -1254,6 +1273,9 @@ class AdmissionCoordinator:
                         deadline,
                         depth + 1,
                     )
+                self._fence_unfrozen_finalization_locked(
+                    connection, tree_id, now
+                )
                 try:
                     admissions_repo.insert_no_input_decision(
                         connection,
@@ -1405,6 +1427,7 @@ class AdmissionCoordinator:
                             deadline,
                             depth + 1,
                         )
+            self._fence_unfrozen_finalization_locked(connection, tree_id, now)
             try:
                 admissions_repo.insert_no_input_decision(
                     connection,

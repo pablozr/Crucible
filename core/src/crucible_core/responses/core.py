@@ -24,6 +24,22 @@ ERROR_MESSAGES = {
         "This session is already linked to another working tree. "
         "Use the session from its original checkout."
     ),
+    "EXECUTION_ID_REQUIRED": "A confirmed execution ID is required.",
+    "TASK_ID_REQUIRED": "A task ID is required.",
+    "TASK_NOT_RUNNING": "Task is not running.",
+    "INPUT_TASK_MISMATCH": "Input does not belong to this task.",
+    "TASK_CORRELATION_MISMATCH": "Task completion correlation failed.",
+    "INVALID_TERMINAL_SIGNAL": "Terminal signal is not supported.",
+    "INVALID_TERMINAL_OUTCOME": "Terminal outcome is not supported.",
+    "UNSUPPORTED_COMPATIBILITY_PROFILE": (
+        "Compatibility profile is not supported."
+    ),
+    "STALE_CAPTURE_GENERATION": "Final capture generation is stale.",
+    "FINAL_CAPTURE_FENCED_BY_NEXT_INPUT": (
+        "Final capture fenced by next input."
+    ),
+    "FINALIZATION_IN_PROGRESS": "Finalization is in progress.",
+    "FINALIZATION_FAILED": "Finalization failed.",
 }
 
 VALIDATION_MESSAGE = "Request validation failed."

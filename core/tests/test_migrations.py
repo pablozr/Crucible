@@ -24,7 +24,7 @@ def test_migrations_upgrade_fresh_database_to_head(tmp_path):
 
 
 def test_migrations_upgrade_supported_previous_versions_to_head(tmp_path):
-    for revision in ("0001", "0002", "0003"):
+    for revision in ("0001", "0002", "0003", "0004"):
         database_path = tmp_path / f"{revision}.db"
         _upgrade(database_path, revision)
         if revision == "0001":
@@ -48,9 +48,16 @@ def _assert_head_tables(database_path) -> None:
             "WHERE type = 'table' "
             "AND name = 'admission_no_input_decisions'"
         ).fetchone()
+        final_columns = {
+            row[1]
+            for row in connection.exec_driver_sql(
+                "PRAGMA table_info(task_file_changes)"
+            ).fetchall()
+        }
     assert row
-    assert revision == "0004"
+    assert revision == "0005"
     assert decisions
+    assert {"path", "final_content", "patch"} <= final_columns
 
 
 def _insert_legacy_task(database_path) -> None:

@@ -136,4 +136,5 @@ def get_task(database_path: Path, task_id: str) -> dict[str, object] | None:
             for item in tasks_repo.list_input_ids_by_task(connection, task_id)
         ]
         files = tasks_repo.list_task_baseline_files(connection, task_id)
-    return task_detail(row, inputs, files).model_dump()
+        changes = tasks_repo.list_task_file_changes(connection, task_id)
+    return task_detail(row, inputs, files, changes).model_dump()

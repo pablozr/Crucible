@@ -18,6 +18,7 @@ from .responses.core import (
 from .routes.admissions import router as admissions_router
 from .routes.system import router as system_router
 from .services.admissions import reconcile_incomplete_admissions
+from .services.finalizations import recover_finalizations
 
 
 @asynccontextmanager
@@ -25,6 +26,7 @@ async def lifespan(app: FastAPI):
     settings = load_settings()
     upgrade(settings.database_path)
     reconcile_incomplete_admissions(settings.database_path)
+    recover_finalizations(settings.database_path)
     app.state.settings = settings
     yield
 

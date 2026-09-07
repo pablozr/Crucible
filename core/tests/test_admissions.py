@@ -212,7 +212,8 @@ def test_incomplete_candidate_is_expired_on_startup(monkeypatch, tmp_path):
     connection.executescript(
         """
         INSERT INTO projects VALUES ('project', '/repo');
-        INSERT INTO working_trees VALUES ('tree', 'project', '/repo');
+        INSERT INTO working_trees (id, project_id, git_root)
+        VALUES ('tree', 'project', '/repo');
         INSERT INTO sessions (id, working_tree_id, adapter, agent_session_id)
         VALUES ('session', 'tree', 'adapter', 'session');
         INSERT INTO admission_candidates
