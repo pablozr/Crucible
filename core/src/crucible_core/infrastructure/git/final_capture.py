@@ -8,6 +8,10 @@ from pathlib import Path
 from typing import Any
 
 from crucible_core.core.errors import FinalizationError
+from crucible_core.infrastructure.git.index_manifest import (
+    build_canonical_manifest,
+    normalize_stored_manifest,
+)
 from crucible_core.schemas.persistence import (
     BaselineFileRow,
     TaskFileChangeRow,
@@ -67,8 +71,18 @@ def _validate_supported_state(
         raise FinalizationError("BRANCH_CHANGED_DURING_TASK")
     if state["head"] != baseline_head:
         raise FinalizationError("UNSUPPORTED_HEAD_STATE")
-    if state["index"] != baseline_index:
+    if _normalize_index(state["index"]) != _normalize_index(baseline_index):
         raise FinalizationError("UNSUPPORTED_INDEX_STATE")
+
+
+def _normalize_index(value: bytes) -> bytes:
+    try:
+        normalized = normalize_stored_manifest(value)
+    except ValueError:
+        raise FinalizationError("FINAL_CAPTURE_FAILED") from None
+    if normalized is None:
+        raise FinalizationError("FINAL_CAPTURE_FAILED")
+    return normalized
 
 
 def _git_state(root: Path, deadline: float) -> dict[str, Any]:
@@ -85,6 +99,11 @@ def _git_state(root: Path, deadline: float) -> dict[str, Any]:
         raise
     if not head or not branch:
         raise FinalizationError("UNSUPPORTED_HEAD_STATE")
+    try:
+        raw_index = _git(root, ["ls-files", "-s", "-z"], deadline)
+        index = build_canonical_manifest(raw_index)
+    except ValueError:
+        raise FinalizationError("FINAL_CAPTURE_FAILED") from None
     return {
         "head": head.decode().strip(),
         "branch": branch.decode().strip(),
@@ -93,7 +112,7 @@ def _git_state(root: Path, deadline: float) -> dict[str, Any]:
             ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
             deadline,
         ),
-        "index": _git(root, ["ls-files", "-s", "-z"], deadline),
+        "index": index,
     }
 
 

@@ -7,6 +7,9 @@ import time
 from pathlib import Path
 from typing import Any
 
+from crucible_core.infrastructure.git.index_manifest import (
+    build_canonical_manifest,
+)
 from crucible_core.logging import get_logger
 from crucible_core.schemas.persistence import BaselineFileRow
 
@@ -65,6 +68,13 @@ def _git_state(root: Path, deadline: float) -> dict[str, Any]:
     if not head or not branch:
         raise AdmissionError("UNSUPPORTED_HEAD_STATE")
 
+    try:
+        raw_index = _git(root, ["ls-files", "-s", "-z"], deadline)
+        index = build_canonical_manifest(raw_index)
+    except ValueError:
+        logger.warning("git index failed code=BASELINE_CAPTURE_FAILED")
+        raise AdmissionError("BASELINE_CAPTURE_FAILED") from None
+
     return {
         "head": head.decode().strip(),
         "branch": branch.decode().strip(),
@@ -73,7 +83,7 @@ def _git_state(root: Path, deadline: float) -> dict[str, Any]:
             ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
             deadline,
         ),
-        "index": _git(root, ["ls-files", "-s", "-z"], deadline),
+        "index": index,
     }
 
 

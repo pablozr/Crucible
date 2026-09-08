@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import base64
 
+from crucible_core.infrastructure.git.index_manifest import (
+    manifest_sha256,
+    normalize_stored_manifest,
+)
 from crucible_core.schemas.admissions import (
     BaselineFile,
     EventDetail,
@@ -78,12 +82,35 @@ def task_summary(row: TaskPageRow) -> TaskSummary:
     )
 
 
+def _canonical_manifest_fields(
+    stored: bytes | None,
+) -> tuple[str | None, str | None]:
+    if stored is None:
+        return None, None
+    try:
+        canonical = normalize_stored_manifest(stored)
+    except ValueError:
+        return None, None
+    if canonical is None:
+        return None, None
+    return (
+        base64.b64encode(canonical).decode(),
+        manifest_sha256(canonical),
+    )
+
+
 def task_detail(
     row: TaskDetailRow,
     input_ids: list[str],
     files: list[BaselineFileRow],
     changes: list[TaskFileChangeRow],
 ) -> TaskDetail:
+    baseline_manifest, baseline_sha = _canonical_manifest_fields(
+        row.baseline_index_manifest
+    )
+    final_manifest, final_sha = _canonical_manifest_fields(
+        row.final_index_manifest
+    )
     return TaskDetail(
         id=row.id,
         status=row.status,
@@ -97,11 +124,8 @@ def task_detail(
         baseline_status=base64.b64encode(row.baseline_status).decode()
         if row.baseline_status
         else None,
-        baseline_index_manifest=(
-            base64.b64encode(row.baseline_index_manifest).decode()
-            if row.baseline_index_manifest
-            else None
-        ),
+        baseline_index_manifest=baseline_manifest,
+        baseline_index_sha256=baseline_sha,
         input_ids=input_ids,
         baseline_files=[
             BaselineFile(
@@ -123,11 +147,8 @@ def task_detail(
         final_status=base64.b64encode(row.final_status).decode()
         if row.final_status
         else None,
-        final_index_manifest=(
-            base64.b64encode(row.final_index_manifest).decode()
-            if row.final_index_manifest
-            else None
-        ),
+        final_index_manifest=final_manifest,
+        final_index_sha256=final_sha,
         snapshot_frozen_at=row.snapshot_frozen_at,
         task_diff=row.task_diff,
         evidence_completeness=row.evidence_completeness,

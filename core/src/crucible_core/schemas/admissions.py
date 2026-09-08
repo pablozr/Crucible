@@ -76,12 +76,14 @@ class TaskDetail(TaskSummary):
     baseline_head: str | None = None
     baseline_status: str | None = None
     baseline_index_manifest: str | None = None
+    baseline_index_sha256: str | None = None
     input_ids: list[str]
     baseline_files: list[BaselineFile]
     final_head: str | None = None
     final_branch: str | None = None
     final_status: str | None = None
     final_index_manifest: str | None = None
+    final_index_sha256: str | None = None
     snapshot_frozen_at: str | None = None
     task_diff: str | None = None
     evidence_completeness: str | None = None
