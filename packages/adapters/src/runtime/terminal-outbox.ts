@@ -10,30 +10,32 @@ import {
   canonicalJson,
   getEvent,
   postCanonicalEvent,
-  type Admission,
-  type CanonicalCandidate,
-  type CoreConnectionOptions,
-  type FetchImpl,
 } from "./core-client.js";
+import type {
+  Admission,
+  AdmittedTerminalInput,
+  CandidateReservationInput,
+  CanonicalCandidate,
+  CoreConnectionOptions,
+  FetchImpl,
+  OutboxDelivery,
+  OutboxDeliveryOptions,
+  TerminalAbortReason,
+  TerminalEnvelopeInput,
+  TerminalOutboxPolicy,
+  TerminalOutboxTimer,
+} from "./contracts.js";
 
-export type TerminalOutboxPolicy = {
-  maxBytes: number;
-  reservationBytes: number;
-  authorizationWindowMs: number;
-  leaseMs: number;
-  backoffBaseMs: number;
-  backoffMaxMs: number;
-  clock: () => number;
-  jitter: (maximumDelayMs: number) => number;
-  timer: TerminalOutboxTimer;
-  dataDir?: string;
-  busyTimeoutMs: number;
-};
-
-export type TerminalOutboxTimer = {
-  schedule: (callback: () => void, delayMs: number) => unknown;
-  cancel: (handle: unknown) => void;
-};
+export type {
+  AdmittedTerminalInput,
+  CandidateReservationInput,
+  OutboxDelivery,
+  OutboxDeliveryOptions,
+  TerminalAbortReason,
+  TerminalEnvelopeInput,
+  TerminalOutboxPolicy,
+  TerminalOutboxTimer,
+} from "./contracts.js";
 
 // P14/E10 production candidates (2026-09-07): the reservation exceeds the
 // worst measured envelope by 3.45x, and the authorization window covers the
@@ -67,47 +69,6 @@ export function createTerminalOutboxPolicy(
   };
 }
 
-export type TerminalEnvelopeInput = {
-  eventId: string;
-  occurredAt: string;
-  adapter: string;
-  adapterVersion: string;
-  agentSessionId: string;
-  inputId: string;
-  executionId: string;
-  projectId: string;
-  gitRoot: string;
-  workspacePath: string;
-  taskId: string;
-  terminalSignal: string;
-  terminalOutcome: string;
-  compatibilityProfile: string;
-  terminalObservedAt: string;
-};
-
-export type AdmittedTerminalInput = Omit<
-  TerminalEnvelopeInput,
-  "inputId" | "projectId" | "gitRoot" | "workspacePath" | "taskId"
->;
-
-export type OutboxDeliveryOptions = {
-  fetchImpl: FetchImpl;
-  coreUrl: string;
-  timeoutMs: number;
-  policy: TerminalOutboxPolicy;
-};
-
-export type CandidateReservationInput = {
-  candidate: CanonicalCandidate;
-  agentSessionId: string;
-  executionId: string;
-  projectId: string;
-  gitRoot: string;
-  workspacePath: string;
-  compatibilityProfile: string;
-  reconciliationDelayMs: number;
-};
-
 type OutboxRow = {
   id: string;
   reserved_bytes: number;
@@ -127,9 +88,7 @@ const TERMINAL_ABORT_REASONS = [
   "DISPATCH_FAILED",
   "TERMINAL_OBSERVER_FAILED",
   "TERMINAL_SIGNAL_MISMATCH",
-] as const;
-
-export type TerminalAbortReason = (typeof TERMINAL_ABORT_REASONS)[number];
+] as const satisfies readonly TerminalAbortReason[];
 
 // A persisted abort envelope/event/hash is immutable: a later terminal
 // observation must never clear or replace it with a completion.
@@ -141,13 +100,6 @@ type CandidateRow = {
   candidate_payload_hash: string;
   attempts: number;
   last_diagnostic: string | null;
-};
-
-export type OutboxDelivery = {
-  eventId: string;
-  terminal: boolean;
-  accepted: boolean;
-  diagnostic?: string;
 };
 
 function requirePolicy(policy: TerminalOutboxPolicy): void {

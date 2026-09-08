@@ -1,10 +1,7 @@
 import type { Delivery, DispatchFn, DispatchResult } from "../contracts.js";
-import type { FetchImpl } from "../runtime/core-client.js";
+import type { FetchImpl, TerminalOutboxPolicy } from "../runtime/contracts.js";
 import type { ResolveProjectFn } from "../runtime/project-resolver.js";
-import type {
-  TerminalOutboxController,
-  TerminalOutboxPolicy,
-} from "../runtime/terminal-outbox.js";
+import type { TerminalOutboxController } from "../runtime/terminal-outbox.js";
 
 export const SUPPORTED_OPENCODE_VERSION = "1.18.28";
 export const ADAPTER = "opencode-v1";

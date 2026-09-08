@@ -17,7 +17,8 @@ import {
   stopTerminalOutboxController,
   type TerminalOutboxPolicy,
 } from "../src/opencode-v1/index.js";
-import { createCanonicalCandidate, type FetchImpl } from "../src/runtime/core-client.js";
+import { createCanonicalCandidate } from "../src/runtime/core-client.js";
+import type { FetchImpl } from "../src/runtime/contracts.js";
 import { loadSqliteDriver } from "../src/runtime/sqlite-driver.js";
 
 const PROJECT_ID = "123e4567-e89b-42d3-a456-426614174000";

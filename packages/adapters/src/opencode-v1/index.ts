@@ -36,4 +36,4 @@ export type {
   TerminalAbortReason,
   TerminalOutboxPolicy,
   TerminalOutboxTimer,
-} from "../runtime/terminal-outbox.js";
+} from "../runtime/contracts.js";

@@ -4,7 +4,7 @@ import type {
   DispatchResult,
   UntrackedDispatchContext,
 } from "../contracts.js";
-import type { Admission } from "./core-client.js";
+import type { Admission } from "./contracts.js";
 import type { ResolvedProject } from "./project-resolver.js";
 
 function errorCode(error: unknown, fallback: string): string {

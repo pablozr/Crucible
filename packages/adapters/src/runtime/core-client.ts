@@ -1,55 +1,23 @@
 import { createHash, randomUUID } from "node:crypto";
 
-import type { Delivery } from "../contracts.js";
+import type {
+  Admission,
+  CandidateInput,
+  CanonicalCandidate,
+  CoreConnectionOptions,
+  FetchImpl,
+} from "./contracts.js";
 
-export type FetchImpl = (
-  input: string,
-  init?: RequestInit,
-) => Promise<Response>;
-
-export type CandidateInput = {
-  agentSessionId: string;
-  messageId: string;
-  workspacePath: string;
-  gitRoot: string;
-  projectId: string;
-  delivery: Delivery;
-  prompt?: string;
-  model?: string;
-  executionId?: string;
-};
+export type {
+  Admission,
+  CandidateInput,
+  CanonicalCandidate,
+  CoreConnectionOptions,
+  FetchImpl,
+} from "./contracts.js";
 
 export const COMPLETION_UNCONFIRMED = "COMPLETION_UNCONFIRMED";
 export const CORE_CONFIGURATION_REQUIRED = "CORE_CONFIGURATION_REQUIRED";
-
-export type CoreConnectionOptions = {
-  fetchImpl: FetchImpl;
-  coreUrl: string;
-  timeoutMs: number;
-};
-
-export type CanonicalCandidate = {
-  eventId: string;
-  envelope: string;
-  payloadHash: string;
-};
-
-export type Admission =
-  | {
-      tracked: true;
-      outcome: "admitted";
-      taskId: string | null;
-      inputId: string | null;
-      eventId: string;
-    }
-  | {
-      tracked: false;
-      outcome: string;
-      diagnostic: string;
-      taskId: string | null;
-      inputId: string | null;
-      eventId: string;
-    };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);

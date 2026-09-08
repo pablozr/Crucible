@@ -6,7 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { dispatchOpenCodeV1 } from "../src/opencode-v1/index.js";
-import type { FetchImpl } from "../src/runtime/core-client.js";
+import type { FetchImpl } from "../src/runtime/contracts.js";
 import { resolveProject } from "../src/runtime/project-resolver.js";
 
 const PROJECT_ID = "123e4567-e89b-42d3-a456-426614174000";

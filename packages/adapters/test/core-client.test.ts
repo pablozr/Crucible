@@ -3,8 +3,8 @@ import test from "node:test";
 
 import {
   postInputCandidate,
-  type FetchImpl,
 } from "../src/runtime/core-client.js";
+import type { FetchImpl } from "../src/runtime/contracts.js";
 
 const ADAPTER = "opencode-v1";
 const ADAPTER_VERSION = "0.1.0";
