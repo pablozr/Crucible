@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import difflib
 import gzip
+import math
 import sqlite3
 import time
 from datetime import UTC, datetime, timedelta
@@ -97,12 +98,14 @@ class FinalizationCoordinator:
         publication_hook: Callable[[], None] | None = None,
         clock: Callable[[], datetime] | None = None,
         max_authorization_window_seconds: int | None = None,
+        monotonic: Callable[[], float] | None = None,
     ) -> None:
         self._database_path = database_path
         self._capture_final = capture_final
         self._publication_hook = publication_hook
         self._clock = clock or (lambda: datetime.now(UTC))
         self._max_window_seconds = max_authorization_window_seconds
+        self._monotonic = monotonic or time.monotonic
 
     def complete(self, event: EventRequest) -> dict[str, object]:
         event_id = str(event.event_id)
@@ -151,7 +154,7 @@ class FinalizationCoordinator:
         if isinstance(begun, dict):
             return begun
         generation, task, input_row_id = begun
-        deadline = time.monotonic() + FINAL_CAPTURE_DEADLINE_SECONDS
+        deadline = self._monotonic() + FINAL_CAPTURE_DEADLINE_SECONDS
         try:
             # resolve_project performs Git reads, so it must only run after
             # _begin's transaction has rechecked the capture window and
@@ -177,9 +180,13 @@ class FinalizationCoordinator:
                 project.max_snapshot_file_size_bytes,
                 deadline,
             )
+            if self._monotonic() >= deadline:
+                raise FinalizationError("FINAL_SNAPSHOT_TIMEOUT")
             if self._publication_hook is not None:
                 self._publication_hook()
-            self._freeze(task_id, task.tree_id, generation, snapshot)
+            if self._monotonic() >= deadline:
+                raise FinalizationError("FINAL_SNAPSHOT_TIMEOUT")
+            self._freeze(task_id, task.tree_id, generation, snapshot, deadline)
             self.materialize(task_id)
         except FinalizationError as error:
             self._fail(task_id, generation, error.code)
@@ -429,18 +436,51 @@ class FinalizationCoordinator:
         tree_id: str,
         generation: int,
         snapshot: dict[str, Any],
+        deadline: float,
     ) -> None:
         with connect(self._database_path) as connection:
-            connection.execute("BEGIN IMMEDIATE")
+            now = self._monotonic()
+            # Positive remainders round up so a sub-ms remainder
+            # still grants a 1ms lock wait instead of no wait.
+            remaining_ms = max(0, math.ceil((deadline - now) * 1000))
+            connection.execute(f"PRAGMA busy_timeout = {remaining_ms}")
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+            except sqlite3.OperationalError as error:
+                try:
+                    connection.rollback()
+                except sqlite3.Error:
+                    pass
+                if now >= deadline or self._monotonic() >= deadline:
+                    raise FinalizationError(
+                        "FINAL_SNAPSHOT_TIMEOUT"
+                    ) from error
+                raise
+            if self._monotonic() >= deadline:
+                connection.rollback()
+                raise FinalizationError("FINAL_SNAPSHOT_TIMEOUT")
             if not final_repo.publication_is_current(
                 connection, task_id, tree_id, generation
             ):
+                connection.rollback()
                 raise FinalizationError("STALE_CAPTURE_GENERATION", 409)
+            if self._monotonic() >= deadline:
+                connection.rollback()
+                raise FinalizationError("FINAL_SNAPSHOT_TIMEOUT")
             for row in snapshot["baseline_files"]:
                 final_repo.insert_baseline_file(connection, task_id, row)
+            if self._monotonic() >= deadline:
+                connection.rollback()
+                raise FinalizationError("FINAL_SNAPSHOT_TIMEOUT")
             for row in snapshot["changes"]:
                 final_repo.insert_file_change(connection, task_id, row)
+            if self._monotonic() >= deadline:
+                connection.rollback()
+                raise FinalizationError("FINAL_SNAPSHOT_TIMEOUT")
             frozen_at = utc_now_iso()
+            if self._monotonic() >= deadline:
+                connection.rollback()
+                raise FinalizationError("FINAL_SNAPSHOT_TIMEOUT")
             changed = connection.execute(
                 "UPDATE tasks SET final_head = ?, final_branch = ?, "
                 "final_status = ?, final_index_manifest = ?, "
@@ -464,7 +504,11 @@ class FinalizationCoordinator:
                 ),
             ).rowcount
             if changed != 1:
+                connection.rollback()
                 raise FinalizationError("STALE_CAPTURE_GENERATION", 409)
+            if self._monotonic() >= deadline:
+                connection.rollback()
+                raise FinalizationError("FINAL_SNAPSHOT_TIMEOUT")
             connection.commit()
 
     def materialize(self, task_id: str) -> None:

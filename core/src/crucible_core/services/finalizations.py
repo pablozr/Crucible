@@ -11,6 +11,7 @@ from crucible_core.schemas.admissions import EventRequest
 _capture_final = capture_final
 _PUBLICATION_HOOK: Any = None
 _CLOCK: Callable[[], datetime] | None = None
+_MONOTONIC: Callable[[], float] | None = None
 _MAX_AUTHORIZATION_WINDOW_SECONDS: int | None = None
 
 
@@ -29,6 +30,7 @@ def complete_event(
         publication_hook=_PUBLICATION_HOOK,
         clock=clock,
         max_authorization_window_seconds=window,
+        monotonic=_MONOTONIC,
     ).complete(event)
 
 

@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import gzip
-import hashlib
 import subprocess
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from crucible_core.core.errors import FinalizationError
+from crucible_core.infrastructure.git.content_hash import (
+    HashBudget,
+    hash_stream,
+    hash_worktree_file,
+)
 from crucible_core.infrastructure.git.index_manifest import (
     build_canonical_manifest,
 )
@@ -17,6 +21,8 @@ from crucible_core.schemas.persistence import (
 )
 
 SUBPROCESS_TIMEOUT_SECONDS = 2
+HASH_PER_FILE_BUDGET_SECONDS = 2.0
+HASH_AGGREGATE_BUDGET_SECONDS = 3.0
 
 
 def capture_final(
@@ -27,42 +33,71 @@ def capture_final(
     baseline_files: list[BaselineFileRow],
     max_size: int,
     deadline: float,
+    *,
+    clock: Callable[[], float] | None = None,
+    opener: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
     # baseline_index is retained for signature compatibility; index
     # changes are allowed in slice 7.2 and final index is evidence only.
     _ = baseline_index
-    first = _git_state(root, deadline)
-    _validate_supported_state(
-        first, baseline_head, baseline_branch, root, deadline
+    tick = clock or time.monotonic
+    open_fn = opener or open
+    budget = HashBudget(
+        aggregate_budget=HASH_AGGREGATE_BUDGET_SECONDS,
+        per_file_budget=HASH_PER_FILE_BUDGET_SECONDS,
     )
-    evidence = _capture_paths(
-        root,
-        baseline_head,
-        first["head"],
-        first["status"],
-        baseline_files,
-        max_size,
-        deadline,
-    )
-    second = _git_state(root, deadline)
-    _validate_supported_state(
-        second, baseline_head, baseline_branch, root, deadline
-    )
-    second_evidence = _capture_paths(
-        root,
-        baseline_head,
-        second["head"],
-        second["status"],
-        baseline_files,
-        max_size,
-        deadline,
-    )
-    if first != second or _evidence_identity(evidence) != _evidence_identity(
-        second_evidence
-    ):
-        raise FinalizationError("FINAL_SNAPSHOT_UNSTABLE")
+    unstable: FinalizationError | None = None
+    for _ in range(2):
+        try:
+            first = _git_state(root, deadline, tick)
+            _validate_supported_state(
+                first, baseline_head, baseline_branch, root, deadline, tick
+            )
+            evidence = _capture_paths(
+                root,
+                baseline_head,
+                first["head"],
+                first["status"],
+                baseline_files,
+                max_size,
+                deadline,
+                tick,
+                open_fn,
+                budget,
+            )
+            second = _git_state(root, deadline, tick)
+            _validate_supported_state(
+                second, baseline_head, baseline_branch, root, deadline, tick
+            )
+            second_evidence = _capture_paths(
+                root,
+                baseline_head,
+                second["head"],
+                second["status"],
+                baseline_files,
+                max_size,
+                deadline,
+                tick,
+                open_fn,
+                budget,
+            )
+        except FinalizationError as error:
+            if error.code != "FINAL_SNAPSHOT_UNSTABLE":
+                raise
+            unstable = error
+            continue
+        if first != second or _evidence_identity(
+            evidence
+        ) != _evidence_identity(second_evidence):
+            unstable = FinalizationError("FINAL_SNAPSHOT_UNSTABLE")
+            continue
 
-    return {**first, **evidence}
+        return {**first, **evidence}
+    raise (
+        unstable
+        if unstable is not None
+        else FinalizationError("FINAL_SNAPSHOT_UNSTABLE")
+    )
 
 
 def _validate_supported_state(
@@ -71,19 +106,24 @@ def _validate_supported_state(
     baseline_branch: str,
     root: Path,
     deadline: float,
+    tick: Callable[[], float],
 ) -> None:
     if state["branch"] != baseline_branch:
         raise FinalizationError("BRANCH_CHANGED_DURING_TASK")
     if state["head"] != baseline_head:
         _ensure_same_branch_advance(
-            root, baseline_head, state["head"], deadline
+            root, baseline_head, state["head"], deadline, tick
         )
 
 
 def _ensure_same_branch_advance(
-    root: Path, baseline_head: str, final_head: str, deadline: float
+    root: Path,
+    baseline_head: str,
+    final_head: str,
+    deadline: float,
+    tick: Callable[[], float],
 ) -> None:
-    timeout = min(SUBPROCESS_TIMEOUT_SECONDS, deadline - time.monotonic())
+    timeout = min(SUBPROCESS_TIMEOUT_SECONDS, deadline - tick())
     if timeout <= 0:
         raise FinalizationError("FINAL_SNAPSHOT_TIMEOUT")
     try:
@@ -102,6 +142,12 @@ def _ensure_same_branch_advance(
         )
     except subprocess.TimeoutExpired as error:
         raise FinalizationError("FINAL_SNAPSHOT_TIMEOUT") from error
+    except OSError as error:
+        if tick() >= deadline:
+            raise FinalizationError("FINAL_SNAPSHOT_TIMEOUT") from error
+        raise FinalizationError("FINAL_CAPTURE_FAILED") from error
+    if tick() >= deadline:
+        raise FinalizationError("FINAL_SNAPSHOT_TIMEOUT")
     if result.returncode == 0:
         return
     if result.returncode == 1:
@@ -114,7 +160,11 @@ _CLEAN_FINAL_STATUS = "  "
 
 
 def _head_changed_paths(
-    root: Path, baseline_head: str, final_head: str, deadline: float
+    root: Path,
+    baseline_head: str,
+    final_head: str,
+    deadline: float,
+    tick: Callable[[], float],
 ) -> set[str]:
     if baseline_head == final_head:
         return set()
@@ -130,6 +180,7 @@ def _head_changed_paths(
                 final_head,
             ],
             deadline,
+            tick,
         )
     except FinalizationError as error:
         if error.code == "FINAL_CAPTURE_FAILED":
@@ -146,13 +197,16 @@ def _head_changed_paths(
     return paths
 
 
-def _git_state(root: Path, deadline: float) -> dict[str, Any]:
+def _git_state(
+    root: Path, deadline: float, tick: Callable[[], float]
+) -> dict[str, Any]:
     try:
-        head = _git(root, ["rev-parse", "--verify", "HEAD"], deadline)
+        head = _git(root, ["rev-parse", "--verify", "HEAD"], deadline, tick)
         branch = _git(
             root,
             ["symbolic-ref", "--quiet", "--short", "HEAD"],
             deadline,
+            tick,
         )
     except FinalizationError as error:
         if error.code == "FINAL_CAPTURE_FAILED":
@@ -161,7 +215,7 @@ def _git_state(root: Path, deadline: float) -> dict[str, Any]:
     if not head or not branch:
         raise FinalizationError("UNSUPPORTED_HEAD_STATE")
     try:
-        raw_index = _git(root, ["ls-files", "-s", "-z"], deadline)
+        raw_index = _git(root, ["ls-files", "-s", "-z"], deadline, tick)
         index = build_canonical_manifest(raw_index)
     except ValueError:
         raise FinalizationError("FINAL_CAPTURE_FAILED") from None
@@ -172,6 +226,7 @@ def _git_state(root: Path, deadline: float) -> dict[str, Any]:
             root,
             ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
             deadline,
+            tick,
         ),
         "index": index,
     }
@@ -185,10 +240,15 @@ def _capture_paths(
     baseline_files: list[BaselineFileRow],
     max_size: int,
     deadline: float,
+    tick: Callable[[], float],
+    open_fn: Callable[..., Any],
+    budget: HashBudget,
 ) -> dict[str, list[Any]]:
     initial_rows = {row.path: row for row in baseline_files}
     final_states = _parse_status(final_status)
-    committed = _head_changed_paths(root, baseline_head, final_head, deadline)
+    committed = _head_changed_paths(
+        root, baseline_head, final_head, deadline, tick
+    )
     paths = sorted(set(initial_rows) | set(final_states) | committed)
     frozen_baselines: list[BaselineFileRow] = []
     changes: list[TaskFileChangeRow] = []
@@ -205,15 +265,26 @@ def _capture_paths(
                 path,
                 max_size,
                 deadline,
+                tick,
+                budget,
             )
             if initial is not None:
                 frozen_baselines.append(initial)
         final = _read_final_head_file(
-            root, final_head, path, max_size, deadline
+            root, final_head, path, max_size, deadline, tick, budget
         )
         if final_states.get(path) is not None:
+            file_started_at = tick()
             final = _read_final_file(
-                root, path, final_states.get(path), max_size, deadline
+                root,
+                path,
+                final_states.get(path),
+                max_size,
+                deadline,
+                tick,
+                open_fn,
+                budget,
+                file_started_at,
             )
         if _same_file(initial, final):
             continue
@@ -282,11 +353,15 @@ def _read_head_file(
     path: str,
     max_size: int,
     deadline: float,
+    tick: Callable[[], float],
+    budget: HashBudget,
 ) -> BaselineFileRow | None:
     try:
-        tree_out = _git(root, ["ls-tree", "-z", head, "--", path], deadline)
+        tree_out = _git(
+            root, ["ls-tree", "-z", head, "--", path], deadline, tick
+        )
     except FinalizationError as error:
-        if error.code == "FINAL_SNAPSHOT_TIMEOUT":
+        if error.code in ("FINAL_SNAPSHOT_TIMEOUT", "FINAL_HASH_TIMEOUT"):
             raise
         raise FinalizationError("BASELINE_OBJECT_UNAVAILABLE") from error
     matched = _match_tree_entry(tree_out, path)
@@ -295,15 +370,9 @@ def _read_head_file(
     _, kind = matched
     if kind == "tree":
         return None
-    try:
-        content = _git(root, ["show", f"{head}:{path}"], deadline)
-    except FinalizationError as error:
-        if error.code == "FINAL_SNAPSHOT_TIMEOUT":
-            raise
-        if error.code != "FINAL_CAPTURE_FAILED":
-            raise
-        raise FinalizationError("BASELINE_OBJECT_UNAVAILABLE") from error
-    return _file_row(path, "  ", content, max_size)
+    return _stream_git_blob_to_row(
+        root, head, path, "  ", max_size, deadline, tick, budget
+    )
 
 
 def _read_final_head_file(
@@ -312,11 +381,15 @@ def _read_final_head_file(
     path: str,
     max_size: int,
     deadline: float,
+    tick: Callable[[], float],
+    budget: HashBudget,
 ) -> BaselineFileRow | None:
     try:
-        tree_out = _git(root, ["ls-tree", "-z", head, "--", path], deadline)
+        tree_out = _git(
+            root, ["ls-tree", "-z", head, "--", path], deadline, tick
+        )
     except FinalizationError as error:
-        if error.code == "FINAL_SNAPSHOT_TIMEOUT":
+        if error.code in ("FINAL_SNAPSHOT_TIMEOUT", "FINAL_HASH_TIMEOUT"):
             raise
         raise FinalizationError("BASELINE_OBJECT_UNAVAILABLE") from error
     matched = _match_tree_entry(tree_out, path)
@@ -327,13 +400,16 @@ def _read_final_head_file(
         return None
     if kind != "blob" or mode not in _REGULAR_BLOB_MODES:
         raise FinalizationError("FINAL_SNAPSHOT_UNSTABLE")
-    try:
-        content = _git(root, ["show", f"{head}:{path}"], deadline)
-    except FinalizationError as error:
-        if error.code == "FINAL_SNAPSHOT_TIMEOUT":
-            raise
-        raise FinalizationError("BASELINE_OBJECT_UNAVAILABLE") from error
-    return _file_row(path, _CLEAN_FINAL_STATUS, content, max_size)
+    return _stream_git_blob_to_row(
+        root,
+        head,
+        path,
+        _CLEAN_FINAL_STATUS,
+        max_size,
+        deadline,
+        tick,
+        budget,
+    )
 
 
 def _match_tree_entry(
@@ -367,39 +443,205 @@ def _read_final_file(
     status: str | None,
     max_size: int,
     deadline: float,
+    tick: Callable[[], float],
+    open_fn: Callable[..., Any],
+    budget: HashBudget,
+    file_started_at: float,
 ) -> BaselineFileRow | None:
     if status is not None and "D" in status:
         return None
     target = root / path
-    if status is None and not target.exists():
-        return None
     try:
+        if status is None and not target.exists():
+            return None
         if not target.is_file() or target.is_symlink():
             raise OSError
-        content = target.read_bytes()
+        digest, size, binary, saved = _hash_worktree_file(
+            target,
+            max_size,
+            deadline,
+            tick,
+            open_fn,
+            budget,
+            file_started_at,
+        )
     except OSError as error:
+        elapsed = tick() - file_started_at
+        budget.commit(elapsed)
+        if (
+            elapsed > budget.per_file_budget
+            or budget.spent > budget.aggregate_budget
+        ):
+            raise FinalizationError("FINAL_HASH_TIMEOUT") from error
         raise FinalizationError("FINAL_SNAPSHOT_UNSTABLE") from error
-    if time.monotonic() > deadline:
+    if tick() >= deadline:
         raise FinalizationError("FINAL_SNAPSHOT_TIMEOUT")
-    return _file_row(path, status or "  ", content, max_size)
-
-
-def _file_row(
-    path: str, status: str, content: bytes, max_size: int
-) -> BaselineFileRow:
-    binary = b"\0" in content
     return BaselineFileRow(
         path=path,
-        status=status,
-        sha256=hashlib.sha256(content).hexdigest(),
-        size=len(content),
-        is_binary=int(binary),
-        content=(
-            gzip.compress(content)
-            if not binary and len(content) <= max_size
-            else None
-        ),
+        status=status or "  ",
+        sha256=digest,
+        size=size,
+        is_binary=binary,
+        content=saved,
     )
+
+
+def _hash_worktree_file(
+    target: Path,
+    max_size: int,
+    deadline: float,
+    tick: Callable[[], float],
+    open_fn: Callable[..., Any],
+    budget: HashBudget,
+    file_started_at: float,
+) -> tuple[str, int, int, bytes | None]:
+    return hash_worktree_file(
+        target,
+        max_size,
+        tick=tick,
+        open_fn=open_fn,
+        budget=budget,
+        file_started_at=file_started_at,
+        deadline=deadline,
+        deadline_error=lambda: FinalizationError("FINAL_SNAPSHOT_TIMEOUT"),
+        budget_error=lambda: FinalizationError("FINAL_HASH_TIMEOUT"),
+    )
+
+
+def _stream_git_blob_to_row(
+    root: Path,
+    head: str,
+    path: str,
+    status: str,
+    max_size: int,
+    deadline: float,
+    tick: Callable[[], float],
+    budget: HashBudget,
+) -> BaselineFileRow:
+    """Stream one ``git show`` blob without buffering it fully.
+
+    Spawns ``git show`` with piped stdout and hashes chunks
+    incrementally under the absolute deadline and aggregate hash
+    budget. Each ``stdout.read`` runs with a wall-clock timeout
+    bounded by the remaining deadline/subprocess budget on a daemon
+    thread, so a blocked producer cannot hang the caller; on timeout
+    the process is killed/reaped and ``FINAL_SNAPSHOT_TIMEOUT`` is
+    raised without leaving the thread/process blocking the return.
+    Retention is capped at ``max_size + 1`` bytes. The subprocess is
+    always reaped fail-safe; ``OSError`` mid-stream charges elapsed
+    once into ``budget`` and promotes deadline/hash exhaustion before
+    mapping the remainder to ``BASELINE_OBJECT_UNAVAILABLE``. The
+    ``proc.wait`` for ``git show`` exit is bounded by the remaining
+    deadline, subprocess, per-file and aggregate hash budgets, and
+    its wait time is charged into ``budget`` before commit, so
+    budget exhaustion during the wait raises ``FINAL_HASH_TIMEOUT``.
+    Non-zero exit prioritizes an expired deadline while deadline and
+    hash-budget errors propagate with final-capture codes.
+    """
+    file_started_at = tick()
+    timeout = min(SUBPROCESS_TIMEOUT_SECONDS, deadline - file_started_at)
+    if timeout <= 0:
+        raise FinalizationError("FINAL_SNAPSHOT_TIMEOUT")
+    try:
+        proc = subprocess.Popen(
+            ["git", "-C", str(root), "show", f"{head}:{path}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError as error:
+        if tick() >= deadline:
+            raise FinalizationError("FINAL_SNAPSHOT_TIMEOUT") from error
+        raise FinalizationError("BASELINE_OBJECT_UNAVAILABLE") from error
+    try:
+        if proc.stdout is None:
+            raise FinalizationError("BASELINE_OBJECT_UNAVAILABLE")
+        try:
+            digest, size, binary, retained, stream_now = hash_stream(
+                proc.stdout,
+                max_size,
+                tick=tick,
+                budget=budget,
+                file_started_at=file_started_at,
+                deadline=deadline,
+                deadline_error=lambda: FinalizationError(
+                    "FINAL_SNAPSHOT_TIMEOUT"
+                ),
+                budget_error=lambda: FinalizationError("FINAL_HASH_TIMEOUT"),
+                subprocess_timeout=SUBPROCESS_TIMEOUT_SECONDS,
+            )
+        except OSError as error:
+            elapsed = tick() - file_started_at
+            budget.commit(elapsed)
+            if tick() >= deadline:
+                raise FinalizationError("FINAL_SNAPSHOT_TIMEOUT") from error
+            if (
+                elapsed > budget.per_file_budget
+                or budget.spent > budget.aggregate_budget
+            ):
+                raise FinalizationError("FINAL_HASH_TIMEOUT") from error
+            raise FinalizationError("BASELINE_OBJECT_UNAVAILABLE") from error
+        elapsed_at_stream = stream_now - file_started_at
+        deadline_remaining = deadline - stream_now
+        subprocess_remaining = SUBPROCESS_TIMEOUT_SECONDS - elapsed_at_stream
+        file_remaining = budget.per_file_budget - elapsed_at_stream
+        aggregate_remaining = budget.aggregate_budget - (
+            budget.spent + elapsed_at_stream
+        )
+        deadline_like = min(deadline_remaining, subprocess_remaining)
+        budget_like = min(file_remaining, aggregate_remaining)
+        remaining = min(deadline_like, budget_like)
+        if remaining <= 0:
+            if deadline_like <= budget_like:
+                raise FinalizationError("FINAL_SNAPSHOT_TIMEOUT")
+            raise FinalizationError("FINAL_HASH_TIMEOUT")
+        try:
+            returncode = proc.wait(timeout=max(remaining, 0.001))
+        except subprocess.TimeoutExpired as error:
+            if deadline_like <= budget_like:
+                raise FinalizationError("FINAL_SNAPSHOT_TIMEOUT") from error
+            raise FinalizationError("FINAL_HASH_TIMEOUT") from error
+        wait_now = tick()
+        if wait_now - file_started_at > SUBPROCESS_TIMEOUT_SECONDS:
+            raise FinalizationError("FINAL_SNAPSHOT_TIMEOUT")
+        budget.check(
+            now=wait_now,
+            file_started_at=file_started_at,
+            deadline=deadline,
+            deadline_error=lambda: FinalizationError("FINAL_SNAPSHOT_TIMEOUT"),
+            budget_error=lambda: FinalizationError("FINAL_HASH_TIMEOUT"),
+        )
+        if returncode != 0:
+            raise FinalizationError("BASELINE_OBJECT_UNAVAILABLE")
+        budget.commit(wait_now - file_started_at)
+        saved = None
+        if not binary and size <= max_size:
+            saved = gzip.compress(bytes(retained))
+        if tick() >= deadline:
+            raise FinalizationError("FINAL_SNAPSHOT_TIMEOUT")
+        return BaselineFileRow(
+            path=path,
+            status=status,
+            sha256=digest,
+            size=size,
+            is_binary=binary,
+            content=saved,
+        )
+    finally:
+        try:
+            if proc.poll() is None:
+                proc.kill()
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=1)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        try:
+            close = getattr(proc.stdout, "close", None)
+            if callable(close):
+                close()
+        except OSError:
+            pass
 
 
 def _same_file(
@@ -430,12 +672,17 @@ def _evidence_reason(
     return "SNAPSHOT_SIZE_LIMIT"
 
 
-def _git(root: Path, arguments: list[str], deadline: float) -> bytes:
-    timeout = min(SUBPROCESS_TIMEOUT_SECONDS, deadline - time.monotonic())
+def _git(
+    root: Path,
+    arguments: list[str],
+    deadline: float,
+    tick: Callable[[], float],
+) -> bytes:
+    timeout = min(SUBPROCESS_TIMEOUT_SECONDS, deadline - tick())
     if timeout <= 0:
         raise FinalizationError("FINAL_SNAPSHOT_TIMEOUT")
     try:
-        return subprocess.run(
+        stdout = subprocess.run(
             ["git", "-C", str(root), *arguments],
             check=True,
             capture_output=True,
@@ -443,5 +690,10 @@ def _git(root: Path, arguments: list[str], deadline: float) -> bytes:
         ).stdout
     except subprocess.TimeoutExpired as error:
         raise FinalizationError("FINAL_SNAPSHOT_TIMEOUT") from error
-    except subprocess.CalledProcessError as error:
+    except (subprocess.CalledProcessError, OSError) as error:
+        if tick() >= deadline:
+            raise FinalizationError("FINAL_SNAPSHOT_TIMEOUT") from error
         raise FinalizationError("FINAL_CAPTURE_FAILED") from error
+    if tick() >= deadline:
+        raise FinalizationError("FINAL_SNAPSHOT_TIMEOUT")
+    return stdout
