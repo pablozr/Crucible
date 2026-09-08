@@ -19,9 +19,10 @@ class Settings:
         return self.data_dir / "crucible.db"
 
 
+DEFAULT_TERMINAL_MAX_AUTHORIZATION_WINDOW_SECONDS = 2
+
+
 def _parse_terminal_window(raw: str | None) -> int | None:
-    if raw is None:
-        return None
     try:
         parsed = int(raw.strip())
     except (ValueError, AttributeError):
@@ -36,9 +37,14 @@ def load_settings() -> Settings:
         if override
         else Path(user_data_path("Crucible", appauthor=False))
     )
-    window = _parse_terminal_window(
-        os.environ.get("CRUCIBLE_TERMINAL_MAX_AUTH_WINDOW_SECONDS")
-    )
+    raw = os.environ.get("CRUCIBLE_TERMINAL_MAX_AUTH_WINDOW_SECONDS")
+    window = _parse_terminal_window(raw)
+
+    # An absent env falls back to the tight default window; an invalid or
+    # non-positive value stays None so authorization fails closed
+    # downstream (TERMINAL_AUTHORIZATION_UNCONFIGURED).
+    if window is None and raw is None:
+        window = DEFAULT_TERMINAL_MAX_AUTHORIZATION_WINDOW_SECONDS
     return Settings(
         data_dir=data_dir.expanduser().resolve(),
         terminal_max_authorization_window_seconds=window,

@@ -22,9 +22,13 @@ export type {
 export {
   TerminalOutbox,
   TerminalOutboxController,
+  createTerminalOutboxPolicy,
+  OUTBOX_MAX_BYTES,
   resolveCrucibleDataDir,
   startTerminalOutboxController,
   stopTerminalOutboxController,
+  TERMINAL_MAX_AUTHORIZATION_WINDOW_MS,
+  TERMINAL_RESERVATION_BYTES,
 } from "../runtime/terminal-outbox.js";
 export type {
   AdmittedTerminalInput,

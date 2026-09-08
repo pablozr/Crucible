@@ -2,9 +2,9 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { DatabaseSync } from "node:sqlite";
 
 import { ADAPTER, ADAPTER_VERSION } from "../opencode-v1/contracts.js";
+import { loadSqliteDriver, type SqliteDatabase } from "./sqlite-driver.js";
 import {
   COMPLETION_UNCONFIRMED,
   canonicalJson,
@@ -34,6 +34,38 @@ export type TerminalOutboxTimer = {
   schedule: (callback: () => void, delayMs: number) => unknown;
   cancel: (handle: unknown) => void;
 };
+
+// P14/E10 production candidates (2026-09-07): the reservation exceeds the
+// worst measured envelope by 3.45x, and the authorization window covers the
+// worst measured terminal delivery p99 by 2.86x.
+export const TERMINAL_RESERVATION_BYTES = 16_384;
+export const OUTBOX_MAX_BYTES = 201_326_592;
+export const TERMINAL_MAX_AUTHORIZATION_WINDOW_MS = 2_000;
+
+const defaultTimer: TerminalOutboxTimer = {
+  schedule: (callback, delayMs) => setTimeout(callback, delayMs),
+  cancel: (handle) => clearTimeout(handle as NodeJS.Timeout),
+};
+
+// Fills production defaults around an explicit or injected test policy;
+// terminal behavior itself stays opt-in at the dispatch layer.
+export function createTerminalOutboxPolicy(
+  overrides: Partial<TerminalOutboxPolicy> = {},
+): TerminalOutboxPolicy {
+  return {
+    maxBytes: OUTBOX_MAX_BYTES,
+    reservationBytes: TERMINAL_RESERVATION_BYTES,
+    authorizationWindowMs: TERMINAL_MAX_AUTHORIZATION_WINDOW_MS,
+    leaseMs: 5_000,
+    backoffBaseMs: 500,
+    backoffMaxMs: 30_000,
+    clock: () => Date.now(),
+    jitter: (maximumDelayMs) => Math.random() * maximumDelayMs,
+    timer: defaultTimer,
+    busyTimeoutMs: 5_000,
+    ...overrides,
+  };
+}
 
 export type TerminalEnvelopeInput = {
   eventId: string;
@@ -78,6 +110,7 @@ export type CandidateReservationInput = {
 
 type OutboxRow = {
   id: string;
+  reserved_bytes: number;
   event_id: string | null;
   task_id: string | null;
   input_id: string | null;
@@ -160,16 +193,48 @@ function responseEvent(body: unknown): Record<string, unknown> | undefined {
 
 export class TerminalOutbox {
   readonly databasePath: string;
-  private readonly database: DatabaseSync;
+  readonly driverName: string;
+  private readonly database: SqliteDatabase;
 
-  constructor(private readonly policy: TerminalOutboxPolicy) {
+  private constructor(
+    private readonly policy: TerminalOutboxPolicy,
+    database: SqliteDatabase,
+    databasePath: string,
+    driverName: string,
+  ) {
+    this.database = database;
+    this.databasePath = databasePath;
+    this.driverName = driverName;
+  }
+
+  get reservationBytes(): number {
+    return this.policy.reservationBytes;
+  }
+
+  static async open(policy: TerminalOutboxPolicy): Promise<TerminalOutbox> {
     requirePolicy(policy);
+    const driver = await loadSqliteDriver();
     const dataDir = resolve(policy.dataDir ?? resolveCrucibleDataDir());
     mkdirSync(dataDir, { recursive: true });
-    this.databasePath = join(dataDir, "adapter-terminal-outbox.db");
-    this.database = new DatabaseSync(this.databasePath);
+    const databasePath = join(dataDir, "adapter-terminal-outbox.db");
+    const database = driver.open(databasePath);
+    try {
+      const outbox = new TerminalOutbox(policy, database, databasePath, driver.name);
+      outbox.initializeSchema();
+      return outbox;
+    } catch (error) {
+      try {
+        database.close();
+      } catch {
+        // The original failure stays authoritative.
+      }
+      throw error;
+    }
+  }
+
+  private initializeSchema(): void {
     this.database.exec(
-      `PRAGMA busy_timeout=${Math.trunc(policy.busyTimeoutMs)}; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;`,
+      `PRAGMA busy_timeout=${Math.trunc(this.policy.busyTimeoutMs)}; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;`,
     );
     this.database.exec(`
       CREATE TABLE IF NOT EXISTS terminal_outbox (
@@ -206,6 +271,10 @@ export class TerminalOutbox {
       ) STRICT;
       CREATE INDEX IF NOT EXISTS terminal_outbox_due
         ON terminal_outbox(state, next_attempt_at, lease_until);
+      CREATE TABLE IF NOT EXISTS terminal_outbox_capacity (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        used_bytes INTEGER NOT NULL
+      ) STRICT;
     `);
     const columns = this.database.prepare("PRAGMA table_info(terminal_outbox)").all() as Array<{ name: string }>;
     if (!columns.some((column) => column.name === "terminal_observed_at")) {
@@ -219,6 +288,32 @@ export class TerminalOutbox {
     this.database.exec(
       "CREATE UNIQUE INDEX IF NOT EXISTS terminal_outbox_abort_event ON terminal_outbox(abort_event_id)",
     );
+    this.initializeCapacityCounter();
+  }
+
+  // One-time initialization: a legacy database without a counter row adopts
+  // its unresolved reservation sum; fresh databases start at zero. Runs under
+  // BEGIN IMMEDIATE so concurrent openers cannot double-insert or compute the
+  // sum from divergent states.
+  private initializeCapacityCounter(): void {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const counter = this.database
+        .prepare("SELECT used_bytes FROM terminal_outbox_capacity WHERE id = 1")
+        .get() as { used_bytes: number } | undefined;
+      if (!counter) {
+        const legacy = this.database
+          .prepare("SELECT COALESCE(SUM(reserved_bytes), 0) AS used FROM terminal_outbox WHERE state != 'terminal'")
+          .get() as { used: number };
+        this.database
+          .prepare("INSERT INTO terminal_outbox_capacity (id, used_bytes) VALUES (1, ?)")
+          .run(legacy.used);
+      }
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   close(): void {
@@ -231,9 +326,9 @@ export class TerminalOutbox {
     this.database.exec("BEGIN IMMEDIATE");
     try {
       const used = this.database
-        .prepare("SELECT COALESCE(SUM(accounted_bytes), 0) AS used FROM terminal_outbox WHERE state != 'terminal'")
-        .get() as { used: number };
-      if (used.used + this.policy.reservationBytes > this.policy.maxBytes) {
+        .prepare("SELECT used_bytes FROM terminal_outbox_capacity WHERE id = 1")
+        .get() as { used_bytes: number };
+      if (used.used_bytes + this.policy.reservationBytes > this.policy.maxBytes) {
         this.database.exec("ROLLBACK");
         return null;
       }
@@ -244,6 +339,9 @@ export class TerminalOutbox {
         VALUES (?, 'reserved', ?, ?, ?, ?, ?, ?)
       `).run(id, this.policy.reservationBytes, this.policy.reservationBytes, now,
         agentSessionId, executionId, profile);
+      this.database
+        .prepare("UPDATE terminal_outbox_capacity SET used_bytes = used_bytes + ? WHERE id = 1")
+        .run(this.policy.reservationBytes);
       this.database.exec("COMMIT");
       return id;
     } catch (error) {
@@ -260,10 +358,10 @@ export class TerminalOutbox {
 
     this.database.exec("BEGIN IMMEDIATE");
     try {
-      const used = this.database.prepare(
-        "SELECT COALESCE(SUM(accounted_bytes), 0) AS used FROM terminal_outbox WHERE state != 'terminal'",
-      ).get() as { used: number };
-      if (used.used + this.policy.reservationBytes > this.policy.maxBytes) {
+      const used = this.database
+        .prepare("SELECT used_bytes FROM terminal_outbox_capacity WHERE id = 1")
+        .get() as { used_bytes: number };
+      if (used.used_bytes + this.policy.reservationBytes > this.policy.maxBytes) {
         this.database.exec("ROLLBACK");
         return null;
       }
@@ -281,6 +379,9 @@ export class TerminalOutbox {
         input.candidate.eventId, input.candidate.envelope,
         input.candidate.payloadHash, now + input.reconciliationDelayMs,
       );
+      this.database
+        .prepare("UPDATE terminal_outbox_capacity SET used_bytes = used_bytes + ? WHERE id = 1")
+        .run(this.policy.reservationBytes);
       this.database.exec("COMMIT");
       return id;
     } catch (error) {
@@ -290,7 +391,26 @@ export class TerminalOutbox {
   }
 
   cancelReservation(id: string): void {
-    this.database.prepare("DELETE FROM terminal_outbox WHERE id = ? AND state = 'reserved'").run(id);
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.database
+        .prepare("SELECT reserved_bytes FROM terminal_outbox WHERE id = ? AND state = 'reserved'")
+        .get(id) as { reserved_bytes: number } | undefined;
+      if (row) {
+        const deleted = this.database
+          .prepare("DELETE FROM terminal_outbox WHERE id = ? AND state = 'reserved'")
+          .run(id);
+        if (deleted.changes === 1) {
+          this.database
+            .prepare("UPDATE terminal_outbox_capacity SET used_bytes = MAX(used_bytes - ?, 0) WHERE id = 1")
+            .run(row.reserved_bytes);
+        }
+      }
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   bindAdmission(id: string, taskId: string, inputId: string): void {
@@ -398,11 +518,26 @@ export class TerminalOutbox {
   }
 
   private releaseCandidate(id: string, diagnostic: string): void {
-    this.database.prepare(`
-      UPDATE terminal_outbox SET state = 'terminal', accounted_bytes = 0,
-        next_attempt_at = NULL, lease_until = NULL, last_diagnostic = ?
-      WHERE id = ? AND state = 'candidate_in_flight'
-    `).run(diagnostic, id);
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.database
+        .prepare("SELECT reserved_bytes FROM terminal_outbox WHERE id = ? AND state = 'candidate_in_flight'")
+        .get(id) as { reserved_bytes: number } | undefined;
+      if (row) {
+        this.database.prepare(`
+          UPDATE terminal_outbox SET state = 'terminal', accounted_bytes = 0,
+            next_attempt_at = NULL, lease_until = NULL, last_diagnostic = ?
+          WHERE id = ? AND state = 'candidate_in_flight'
+        `).run(diagnostic, id);
+        this.database
+          .prepare("UPDATE terminal_outbox_capacity SET used_bytes = MAX(used_bytes - ?, 0) WHERE id = 1")
+          .run(row.reserved_bytes);
+      }
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   private async reconcileCandidate(
@@ -575,9 +710,13 @@ export class TerminalOutbox {
       throw new Error("TERMINAL_ENVELOPE_EXCEEDS_RESERVATION");
     }
     const payloadHash = createHash("sha256").update(envelope).digest("hex");
+    // The fixed reservation charge persists through every unresolved state,
+    // including 'ready': completion envelopes physically retain both the
+    // candidate and terminal payload, so charging the terminal envelope alone
+    // undercounts (P14). Only the terminal acknowledgement releases bytes.
     const result = this.database.prepare(`
       UPDATE terminal_outbox SET state = 'ready', event_id = ?, envelope = ?,
-        payload_hash = ?, accounted_bytes = ?, terminal_observed_at = ?,
+        payload_hash = ?, accounted_bytes = reserved_bytes, terminal_observed_at = ?,
         capture_not_after = ?, next_attempt_at = ?, last_diagnostic = NULL
       WHERE id = ? AND state = 'admitted' AND task_id = ?
         AND COALESCE(native_input_id, input_id) = ?
@@ -585,7 +724,6 @@ export class TerminalOutbox {
       input.eventId,
       envelope,
       payloadHash,
-      bytes,
       input.terminalObservedAt,
       captureNotAfter,
       this.policy.clock(),
@@ -638,12 +776,26 @@ export class TerminalOutbox {
   }
 
   private finish(row: OutboxRow, delivery: OutboxDelivery): OutboxDelivery {
-    this.database.prepare(`
-      UPDATE terminal_outbox SET state = 'terminal', accounted_bytes = 0,
-        lease_until = NULL, next_attempt_at = NULL, last_diagnostic = ?
-      WHERE id = ? AND state = 'leased'
-    `).run(delivery.diagnostic ?? null, row.id);
-    return delivery;
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const result = this.database.prepare(`
+        UPDATE terminal_outbox SET state = 'terminal', accounted_bytes = 0,
+          lease_until = NULL, next_attempt_at = NULL, last_diagnostic = ?
+        WHERE id = ? AND state = 'leased'
+      `).run(delivery.diagnostic ?? null, row.id);
+      // The state guard makes the release exactly-once: a racing process whose
+      // acknowledgement no longer transitions the row decrements nothing.
+      if (result.changes === 1) {
+        this.database
+          .prepare("UPDATE terminal_outbox_capacity SET used_bytes = MAX(used_bytes - ?, 0) WHERE id = 1")
+          .run(row.reserved_bytes);
+      }
+      this.database.exec("COMMIT");
+      return delivery;
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   private retry(row: OutboxRow, diagnostic: string): OutboxDelivery {
@@ -669,12 +821,12 @@ export class TerminalOutbox {
     this.database.exec("BEGIN IMMEDIATE");
     try {
       const row = this.database.prepare(id ? `
-        SELECT id, event_id, task_id, input_id, envelope, payload_hash,
+        SELECT id, reserved_bytes, event_id, task_id, input_id, envelope, payload_hash,
                abort_event_id, abort_envelope, abort_payload_hash, abort_reason, attempts
         FROM terminal_outbox WHERE id = ? AND state IN ('ready', 'aborted', 'leased')
           AND (state IN ('ready', 'aborted') OR lease_until <= ?)
       ` : `
-        SELECT id, event_id, task_id, input_id, envelope, payload_hash,
+        SELECT id, reserved_bytes, event_id, task_id, input_id, envelope, payload_hash,
                abort_event_id, abort_envelope, abort_payload_hash, abort_reason, attempts
         FROM terminal_outbox WHERE state IN ('ready', 'aborted', 'leased')
           AND (state IN ('ready', 'aborted') AND next_attempt_at <= ?
@@ -769,11 +921,23 @@ export class TerminalOutboxController {
   private drainPromise: Promise<void> | undefined;
   private readonly deliveries = new Set<Promise<unknown>>();
 
-  constructor(
+  private constructor(
+    outbox: TerminalOutbox,
     private readonly policy: TerminalOutboxPolicy,
     private readonly deliveryOptions: Omit<OutboxDeliveryOptions, "policy">,
   ) {
-    this.outbox = new TerminalOutbox(policy);
+    this.outbox = outbox;
+  }
+
+  get reservationBytes(): number {
+    return this.outbox.reservationBytes;
+  }
+
+  static async open(
+    policy: TerminalOutboxPolicy,
+    deliveryOptions: Omit<OutboxDeliveryOptions, "policy">,
+  ): Promise<TerminalOutboxController> {
+    return new TerminalOutboxController(await TerminalOutbox.open(policy), policy, deliveryOptions);
   }
 
   start(): void {
@@ -881,21 +1045,35 @@ export class TerminalOutboxController {
 }
 
 const controllers = new Map<string, TerminalOutboxController>();
+const pendingControllers = new Map<string, Promise<TerminalOutboxController>>();
 
 function controllerKey(policy: TerminalOutboxPolicy): string {
   return join(resolve(policy.dataDir ?? resolveCrucibleDataDir()), "adapter-terminal-outbox.db");
 }
 
-export function startTerminalOutboxController(
+export async function startTerminalOutboxController(
   policy: TerminalOutboxPolicy,
   deliveryOptions: Omit<OutboxDeliveryOptions, "policy">,
-): TerminalOutboxController {
+): Promise<TerminalOutboxController> {
   const key = controllerKey(policy);
-  let controller = controllers.get(key);
-  if (!controller) {
-    controller = new TerminalOutboxController(policy, deliveryOptions);
-    controllers.set(key, controller);
+  // Concurrent dispatches share one creation promise so a lost race cannot
+  // leak a second singleton connection behind the map entry.
+  let pending = pendingControllers.get(key);
+  if (!pending) {
+    pending = (async () => {
+      let controller = controllers.get(key);
+      if (!controller) {
+        controller = await TerminalOutboxController.open(policy, deliveryOptions);
+        controllers.set(key, controller);
+      }
+      return controller;
+    })();
+    pendingControllers.set(key, pending);
+    pending.finally(() => {
+      if (pendingControllers.get(key) === pending) pendingControllers.delete(key);
+    }).catch(() => undefined);
   }
+  const controller = await pending;
   controller.start();
   return controller;
 }

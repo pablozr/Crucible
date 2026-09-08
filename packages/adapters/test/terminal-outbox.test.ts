@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -12,11 +12,13 @@ import {
   TERMINAL_SIGNAL,
   TerminalOutbox,
   TerminalOutboxController,
+  createTerminalOutboxPolicy,
   dispatchOpenCodeV1,
   stopTerminalOutboxController,
   type TerminalOutboxPolicy,
 } from "../src/opencode-v1/index.js";
 import { createCanonicalCandidate, type FetchImpl } from "../src/runtime/core-client.js";
+import { loadSqliteDriver } from "../src/runtime/sqlite-driver.js";
 
 const PROJECT_ID = "123e4567-e89b-42d3-a456-426614174000";
 const EVENT_ID = "123e4567-e89b-42d3-a456-426614174001";
@@ -146,7 +148,7 @@ test("lost candidate response is never cancelled or replayed and GET binds exact
   const dataDir = mkdtempSync(join(tmpdir(), "crucible-candidate-reconcile-"));
   t.after(() => rmSync(dataDir, { recursive: true, force: true }));
   let now = NOW;
-  const outbox = new TerminalOutbox(policy(dataDir, { clock: () => now }));
+  const outbox = await TerminalOutbox.open(policy(dataDir, { clock: () => now }));
   const candidate = createCanonicalCandidate({
     agentSessionId: "session-1",
     messageId: "input-1",
@@ -196,7 +198,7 @@ test("candidate GET hash mismatch remains reserved", async (t) => {
   const dataDir = mkdtempSync(join(tmpdir(), "crucible-candidate-mismatch-"));
   t.after(() => rmSync(dataDir, { recursive: true, force: true }));
   let now = NOW;
-  const outbox = new TerminalOutbox(policy(dataDir, { clock: () => now }));
+  const outbox = await TerminalOutbox.open(policy(dataDir, { clock: () => now }));
   const candidate = createCanonicalCandidate({
     agentSessionId: "session-1", messageId: "input-1", executionId: "execution-1",
     projectId: PROJECT_ID, gitRoot: "/repo", workspacePath: "/repo", delivery: "new",
@@ -221,7 +223,7 @@ test("candidate reserve releases only after repeated exact Core not-found", asyn
   const dataDir = mkdtempSync(join(tmpdir(), "crucible-candidate-not-found-"));
   t.after(() => rmSync(dataDir, { recursive: true, force: true }));
   let now = NOW;
-  const outbox = new TerminalOutbox(policy(dataDir, { clock: () => now }));
+  const outbox = await TerminalOutbox.open(policy(dataDir, { clock: () => now }));
   const candidate = createCanonicalCandidate({
     agentSessionId: "session-1", messageId: "input-1", executionId: "execution-1",
     projectId: PROJECT_ID, gitRoot: "/repo", workspacePath: "/repo", delivery: "new",
@@ -252,11 +254,11 @@ test("candidate reserve releases only after repeated exact Core not-found", asyn
   assert.equal(row.accounted_bytes, 0);
 });
 
-test("bind does not start authorization window and completion persists observation atomically", (t) => {
+test("bind does not start authorization window and completion persists observation atomically", async (t) => {
   const dataDir = mkdtempSync(join(tmpdir(), "crucible-outbox-window-"));
   t.after(() => rmSync(dataDir, { recursive: true, force: true }));
   let now = NOW;
-  const outbox = new TerminalOutbox(policy(dataDir, {
+  const outbox = await TerminalOutbox.open(policy(dataDir, {
     authorizationWindowMs: 60_000,
     clock: () => now,
   }));
@@ -286,7 +288,7 @@ test("bind does not start authorization window and completion persists observati
   assert.equal(JSON.parse(ready.envelope).payload.capture_not_after, ready.capture_not_after);
 });
 
-test("legacy outbox database gains capture_not_after before any completion write", (t) => {
+test("legacy outbox database gains capture_not_after before any completion write", async (t) => {
   const dataDir = mkdtempSync(join(tmpdir(), "crucible-outbox-legacy-migration-"));
   t.after(() => rmSync(dataDir, { recursive: true, force: true }));
   const legacy = new DatabaseSync(join(dataDir, "adapter-terminal-outbox.db"));
@@ -313,7 +315,7 @@ test("legacy outbox database gains capture_not_after before any completion write
   `);
   legacy.close();
 
-  const outbox = new TerminalOutbox(policy(dataDir));
+  const outbox = await TerminalOutbox.open(policy(dataDir));
   try {
     const reservation = outbox.reserve("session-1", "execution-1", TERMINAL_COMPATIBILITY_PROFILE)!;
     outbox.bindAdmission(reservation, "task-1", "input-1");
@@ -335,12 +337,12 @@ test("legacy outbox database gains capture_not_after before any completion write
 
 test("capacity exhaustion skips Core candidate but continues OpenCode dispatch", async (t) => {
   const dataDir = mkdtempSync(join(tmpdir(), "crucible-outbox-capacity-"));
-  const first = new TerminalOutbox(policy(dataDir, { maxBytes: 10, reservationBytes: 10 }));
+  const first = await TerminalOutbox.open(policy(dataDir, { maxBytes: 2048, reservationBytes: 2048 }));
   assert.ok(first.reserve("other", "other", TERMINAL_COMPATIBILITY_PROFILE));
   first.close();
   let fetchCalls = 0;
   let context: unknown;
-  const terminalPolicy = policy(dataDir, { maxBytes: 10, reservationBytes: 10 });
+  const terminalPolicy = policy(dataDir, { maxBytes: 2048, reservationBytes: 2048 });
   t.after(async () => {
     await stopTerminalOutboxController(terminalPolicy);
     rmSync(dataDir, { recursive: true, force: true });
@@ -376,7 +378,7 @@ test("ambiguous admission preserves candidate reservation", async (t) => {
   });
 
   assert.equal(result.tracked, false);
-  const outbox = new TerminalOutbox(policy(dataDir, { maxBytes: 2048 }));
+  const outbox = await TerminalOutbox.open(policy(dataDir, { maxBytes: 2048 }));
   assert.equal(outbox.reserve("new", "new", TERMINAL_COMPATIBILITY_PROFILE), null);
   const database = new DatabaseSync(outbox.databasePath, { readOnly: true });
   const row = database.prepare("SELECT state FROM terminal_outbox").get() as { state: string };
@@ -428,10 +430,10 @@ test("dispatch failure keeps admitted reservation durable", async (t) => {
   assert.equal(envelope["event_id"], row.abort_event_id);
 });
 
-test("persisted abort is never replaced by a later terminal observation", (t) => {
+test("persisted abort is never replaced by a later terminal observation", async (t) => {
   const dataDir = mkdtempSync(join(tmpdir(), "crucible-outbox-abort-hook-"));
   t.after(() => rmSync(dataDir, { recursive: true, force: true }));
-  const { outbox, reservation } = abortedRow(dataDir, "DISPATCH_FAILED");
+  const { outbox, reservation } = await abortedRow(dataDir, "DISPATCH_FAILED");
   try {
     assert.equal(outbox.reserve("new", "new", TERMINAL_COMPATIBILITY_PROFILE), null);
     const seeded = abortRow(outbox, reservation);
@@ -452,11 +454,11 @@ test("persisted abort is never replaced by a later terminal observation", (t) =>
   }
 });
 
-function abortedRow(
+async function abortedRow(
   dataDir: string,
   reason: "DISPATCH_FAILED" | "TERMINAL_OBSERVER_FAILED" | "TERMINAL_SIGNAL_MISMATCH",
 ) {
-  const outbox = new TerminalOutbox(policy(dataDir, { maxBytes: 2048 }));
+  const outbox = await TerminalOutbox.open(policy(dataDir, { maxBytes: 2048 }));
   const candidate = createCanonicalCandidate({
     agentSessionId: "session-1", messageId: "input-1", executionId: "execution-1",
     projectId: PROJECT_ID, gitRoot: "/repo", workspacePath: "/repo", delivery: "new",
@@ -493,7 +495,7 @@ function abortRow(outbox: TerminalOutbox, reservation: string) {
 test("each abort reason persists stable bytes and releases only on correlated ACK", async () => {
   for (const reason of ["DISPATCH_FAILED", "TERMINAL_OBSERVER_FAILED", "TERMINAL_SIGNAL_MISMATCH"] as const) {
     const dataDir = mkdtempSync(join(tmpdir(), "crucible-outbox-abort-reason-"));
-    const { outbox, reservation } = abortedRow(dataDir, reason);
+    const { outbox, reservation } = await abortedRow(dataDir, reason);
     try {
       const row = abortRow(outbox, reservation);
       assert.equal(row.state, "aborted");
@@ -544,7 +546,7 @@ test("each abort reason persists stable bytes and releases only on correlated AC
 test("ambiguous lost abort ACK then observation retries only the same abort", async () => {
   const dataDir = mkdtempSync(join(tmpdir(), "crucible-outbox-abort-ambiguous-"));
   let now = NOW;
-  const outbox = new TerminalOutbox(policy(dataDir, { maxBytes: 2048, clock: () => now }));
+  const outbox = await TerminalOutbox.open(policy(dataDir, { maxBytes: 2048, clock: () => now }));
   try {
     const candidate = createCanonicalCandidate({
       agentSessionId: "session-1", messageId: "input-1", executionId: "execution-1",
@@ -616,7 +618,7 @@ test("ambiguous lost abort ACK then observation retries only the same abort", as
 
 test("abort delivery survives lost response and restart with stable id and bytes", async () => {
   const dataDir = mkdtempSync(join(tmpdir(), "crucible-outbox-abort-restart-"));
-  const first = abortedRow(dataDir, "TERMINAL_SIGNAL_MISMATCH");
+  const first = await abortedRow(dataDir, "TERMINAL_SIGNAL_MISMATCH");
   try {
     const seeded = abortRow(first.outbox, first.reservation);
 
@@ -633,7 +635,7 @@ test("abort delivery survives lost response and restart with stable id and bytes
     assert.equal(retained.abort_envelope, seeded.abort_envelope);
     first.outbox.close();
 
-    const second = new TerminalOutbox(policy(dataDir, { maxBytes: 2048 }));
+    const second = await TerminalOutbox.open(policy(dataDir, { maxBytes: 2048 }));
     try {
       let retryEnvelope = "";
       const delivery = await second.deliver({ ...CORE_OPTIONS,
@@ -666,7 +668,7 @@ test("abort delivery survives lost response and restart with stable id and bytes
 
 test("uncorrelated abort responses retain the durable abort", async () => {
   const dataDir = mkdtempSync(join(tmpdir(), "crucible-outbox-abort-mismatch-"));
-  const { outbox, reservation } = abortedRow(dataDir, "TERMINAL_OBSERVER_FAILED");
+  const { outbox, reservation } = await abortedRow(dataDir, "TERMINAL_OBSERVER_FAILED");
   try {
     const seeded = abortRow(outbox, reservation);
     const rejectedBody = {
@@ -713,7 +715,7 @@ test("uncorrelated abort responses retain the durable abort", async () => {
 test("retry after restart reuses immutable event id and bytes and reconciles lost response", async (t) => {
   const dataDir = mkdtempSync(join(tmpdir(), "crucible-outbox-restart-"));
   t.after(() => rmSync(dataDir, { recursive: true, force: true }));
-  const first = new TerminalOutbox(policy(dataDir));
+  const first = await TerminalOutbox.open(policy(dataDir));
   const reservation = first.reserve("session-1", "execution-1", TERMINAL_COMPATIBILITY_PROFILE)!;
   first.bindAdmission(reservation, "task-1", "input-1");
   const stored = first.storeCompletion(reservation, completionInput());
@@ -726,7 +728,7 @@ test("retry after restart reuses immutable event id and bytes and reconciles los
   }, reservation);
   first.close();
 
-  const second = new TerminalOutbox(policy(dataDir));
+  const second = await TerminalOutbox.open(policy(dataDir));
   let retryBytes = "";
   const delivery = await second.deliver({ ...CORE_OPTIONS,
     fetchImpl: async (url, init) => {
@@ -762,7 +764,7 @@ test("started controller retries elapsed backoff without another dispatch", asyn
       },
     },
   });
-  const seed = new TerminalOutbox(controllerPolicy);
+  const seed = await TerminalOutbox.open(controllerPolicy);
   const reservation = seed.reserve("session-1", "execution-1", TERMINAL_COMPATIBILITY_PROFILE)!;
   seed.bindAdmission(reservation, "task-1", "input-1");
   const stored = seed.storeCompletion(reservation, completionInput());
@@ -770,7 +772,7 @@ test("started controller retries elapsed backoff without another dispatch", asyn
   seed.close();
 
   let posts = 0;
-  const controller = new TerminalOutboxController(controllerPolicy, { ...CORE_OPTIONS,
+  const controller = await TerminalOutboxController.open(controllerPolicy, { ...CORE_OPTIONS,
     fetchImpl: async (_url, init) => {
       if (init?.method === "POST") posts += 1;
       return new Response(JSON.stringify(detail(COMPLETION_ID, stored.payloadHash)));
@@ -807,7 +809,7 @@ test("controller restart immediately recovers an expired lease", async (t) => {
       cancel: () => {},
     },
   });
-  const seed = new TerminalOutbox(controllerPolicy);
+  const seed = await TerminalOutbox.open(controllerPolicy);
   const reservation = seed.reserve("session-1", "execution-1", TERMINAL_COMPATIBILITY_PROFILE)!;
   seed.bindAdmission(reservation, "task-1", "input-1");
   const stored = seed.storeCompletion(reservation, completionInput());
@@ -819,7 +821,7 @@ test("controller restart immediately recovers an expired lease", async (t) => {
   now += 1000;
 
   let posts = 0;
-  const controller = new TerminalOutboxController(controllerPolicy, { ...CORE_OPTIONS,
+  const controller = await TerminalOutboxController.open(controllerPolicy, { ...CORE_OPTIONS,
     fetchImpl: async () => {
       posts += 1;
       return new Response(JSON.stringify(detail(COMPLETION_ID, stored.payloadHash)));
@@ -838,7 +840,7 @@ test("direct POST confirms without payload hash but GET reconciliation requires 
   const dataDir = mkdtempSync(join(tmpdir(), "crucible-outbox-confirmation-"));
   t.after(() => rmSync(dataDir, { recursive: true, force: true }));
 
-  const directOutbox = new TerminalOutbox(policy(dataDir));
+  const directOutbox = await TerminalOutbox.open(policy(dataDir));
   const directReservation = directOutbox.reserve("session-1", "execution-1", TERMINAL_COMPATIBILITY_PROFILE)!;
   directOutbox.bindAdmission(directReservation, "task-1", "input-1");
   directOutbox.storeCompletion(directReservation, completionInput());
@@ -865,7 +867,7 @@ test("direct POST confirms without payload hash but GET reconciliation requires 
 
   const reconcileDir = mkdtempSync(join(tmpdir(), "crucible-outbox-reconcile-hash-"));
   t.after(() => rmSync(reconcileDir, { recursive: true, force: true }));
-  const reconcileOutbox = new TerminalOutbox(policy(reconcileDir));
+  const reconcileOutbox = await TerminalOutbox.open(policy(reconcileDir));
   const reconcileReservation = reconcileOutbox.reserve("session-1", "execution-1", TERMINAL_COMPATIBILITY_PROFILE)!;
   reconcileOutbox.bindAdmission(reconcileReservation, "task-1", "input-1");
   reconcileOutbox.storeCompletion(reconcileReservation, completionInput());
@@ -884,7 +886,7 @@ test("direct POST confirms without payload hash but GET reconciliation requires 
 test("processing and identity mismatch remain durable and unresolved entries are never evicted", async (t) => {
   const dataDir = mkdtempSync(join(tmpdir(), "crucible-outbox-processing-"));
   t.after(() => rmSync(dataDir, { recursive: true, force: true }));
-  const outbox = new TerminalOutbox(policy(dataDir, { maxBytes: 2048 }));
+  const outbox = await TerminalOutbox.open(policy(dataDir, { maxBytes: 2048 }));
   const reservation = outbox.reserve("session-1", "execution-1", TERMINAL_COMPATIBILITY_PROFILE)!;
   outbox.bindAdmission(reservation, "task-1", "input-1");
   const stored = outbox.storeCompletion(reservation, completionInput());
@@ -897,7 +899,7 @@ test("processing and identity mismatch remain durable and unresolved entries are
 test("rejected terminal acknowledgement releases reserved capacity", async (t) => {
   const dataDir = mkdtempSync(join(tmpdir(), "crucible-outbox-rejected-"));
   t.after(() => rmSync(dataDir, { recursive: true, force: true }));
-  const outbox = new TerminalOutbox(policy(dataDir, { maxBytes: 2048 }));
+  const outbox = await TerminalOutbox.open(policy(dataDir, { maxBytes: 2048 }));
   const reservation = outbox.reserve("session-1", "execution-1", TERMINAL_COMPATIBILITY_PROFILE)!;
   outbox.bindAdmission(reservation, "task-1", "input-1");
   const stored = outbox.storeCompletion(reservation, completionInput());
@@ -909,7 +911,6 @@ test("rejected terminal acknowledgement releases reserved capacity", async (t) =
   assert.ok(outbox.reserve("new", "new", TERMINAL_COMPATIBILITY_PROFILE));
   outbox.close();
 });
-
 test("terminal observation identity mismatch creates no completion envelope", async (t) => {
   const dataDir = mkdtempSync(join(tmpdir(), "crucible-outbox-identity-"));
   let posts = 0;
@@ -935,4 +936,372 @@ test("terminal observation identity mismatch creates no completion envelope", as
   database.close();
   assert.equal(row.state, "aborted");
   assert.equal(row.envelope, null);
+});
+
+// Reads the singleton capacity counter and asserts the O(1) invariant:
+// the persisted counter always equals the unresolved reservation sum.
+function unresolvedCharge(outbox: TerminalOutbox): number {
+  const database = new DatabaseSync(outbox.databasePath, { readOnly: true });
+  const counter = database
+    .prepare("SELECT used_bytes FROM terminal_outbox_capacity WHERE id = 1")
+    .get() as { used_bytes: number };
+  const sum = database
+    .prepare("SELECT COALESCE(SUM(reserved_bytes), 0) AS used FROM terminal_outbox WHERE state != 'terminal'")
+    .get() as { used: number };
+  database.close();
+  assert.equal(counter.used_bytes, sum.used);
+  return counter.used_bytes;
+}
+
+const completionAck = {
+  status: "ok",
+  data: { event: {
+    event_id: COMPLETION_ID,
+    status: "accepted",
+    outcome: "completed",
+    input_id: "input-1",
+    task_id: "task-1",
+    dispatch_authorized: false,
+  } },
+};
+
+test("runtime sqlite driver selects node:sqlite on Node and drives the outbox", async (t) => {
+  const driver = await loadSqliteDriver();
+  assert.equal(driver.name, "node-sqlite");
+  const dataDir = mkdtempSync(join(tmpdir(), "crucible-outbox-driver-"));
+  t.after(() => rmSync(dataDir, { recursive: true, force: true }));
+  const outbox = await TerminalOutbox.open(policy(dataDir));
+  try {
+    assert.equal(outbox.driverName, "node-sqlite");
+    assert.ok(outbox.reserve("session-1", "execution-1", TERMINAL_COMPATIBILITY_PROFILE));
+    assert.equal(unresolvedCharge(outbox), 2048);
+  } finally {
+    outbox.close();
+  }
+});
+
+test("production policy defaults match P14/E10 candidates and admit injected overrides", () => {
+  const defaults = createTerminalOutboxPolicy();
+  assert.equal(defaults.reservationBytes, 16_384);
+  assert.equal(defaults.maxBytes, 201_326_592);
+  assert.equal(defaults.authorizationWindowMs, 2_000);
+  assert.equal(defaults.leaseMs, 5_000);
+  assert.ok(Number.isFinite(defaults.clock()));
+
+  const injected = createTerminalOutboxPolicy({
+    reservationBytes: 2048,
+    authorizationWindowMs: 60_000,
+    clock: () => NOW,
+    dataDir: "Z:/custom",
+  });
+  assert.equal(injected.reservationBytes, 2048);
+  assert.equal(injected.authorizationWindowMs, 60_000);
+  assert.equal(injected.maxBytes, 201_326_592);
+  assert.equal(injected.clock(), NOW);
+  assert.equal(injected.dataDir, "Z:/custom");
+});
+
+test("adapter fills production defaults from a partial policy and keeps terminal opt-in", async (t) => {
+  const dataDir = mkdtempSync(join(tmpdir(), "crucible-outbox-defaults-"));
+  const partialPolicy: Partial<TerminalOutboxPolicy> = { dataDir };
+  t.after(async () => {
+    await stopTerminalOutboxController(createTerminalOutboxPolicy(partialPolicy));
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  let completionBody: Record<string, unknown> | undefined;
+  let midFlight: { state: string; accounted_bytes: number; counter: number } | undefined;
+  const fetchImpl: FetchImpl = async (_url, init) => {
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    if (body["event_type"] === "input_candidate") {
+      return new Response(JSON.stringify(admission()));
+    }
+    if (body["event_type"] === "task_completed") {
+      completionBody = body;
+      const database = new DatabaseSync(join(dataDir, "adapter-terminal-outbox.db"), { readOnly: true });
+      const row = database
+        .prepare("SELECT state, accounted_bytes FROM terminal_outbox")
+        .get() as { state: string; accounted_bytes: number };
+      const counter = database
+        .prepare("SELECT used_bytes FROM terminal_outbox_capacity WHERE id = 1")
+        .get() as { used_bytes: number };
+      database.close();
+      midFlight = { ...row, counter: counter.used_bytes };
+    }
+    return new Response(JSON.stringify(completionAck));
+  };
+
+  const result = await dispatchOpenCodeV1(request(), { dispatch: async () => "sent" }, {
+    compatibilityProfile: TERMINAL_COMPATIBILITY_PROFILE,
+    terminalPolicy: partialPolicy,
+    observeTerminal: async () => ({
+      agentSessionId: "session-1",
+      executionId: "execution-1",
+      observedAt: "2026-09-07T00:00:01.000Z",
+      signal: TERMINAL_SIGNAL,
+      finish: TERMINAL_OUTCOME,
+    }),
+    testing: {
+      fetchImpl,
+      resolveProject: async () => ({ projectId: PROJECT_ID, gitRoot: "/repo" }),
+      eventId: EVENT_ID,
+      completionEventId: COMPLETION_ID,
+    },
+  });
+
+  const completion = (result as unknown as { completion: Record<string, unknown> }).completion;
+  assert.equal(completion["attempted"], true);
+  assert.equal(completion["confirmed"], true);
+  assert.equal(
+    (completionBody!["payload"] as Record<string, unknown>)["capture_not_after"],
+    "2026-09-07T00:00:03.000Z",
+  );
+  assert.equal(midFlight!.state, "leased");
+  assert.equal(midFlight!.accounted_bytes, 16_384);
+  assert.equal(midFlight!.counter, 16_384);
+  const verifier = await TerminalOutbox.open(createTerminalOutboxPolicy(partialPolicy));
+  assert.equal(unresolvedCharge(verifier), 0);
+  verifier.close();
+});
+
+test("terminal disabled never loads the sqlite driver or creates the outbox database", async (t) => {
+  const dataDir = mkdtempSync(join(tmpdir(), "crucible-outbox-disabled-"));
+  const previous = process.env["CRUCIBLE_DATA_DIR"];
+  process.env["CRUCIBLE_DATA_DIR"] = dataDir;
+  t.after(() => {
+    if (previous === undefined) delete process.env["CRUCIBLE_DATA_DIR"];
+    else process.env["CRUCIBLE_DATA_DIR"] = previous;
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  let posts = 0;
+  const result = await dispatchOpenCodeV1(request(), { dispatch: async () => "sent" }, {
+    compatibilityProfile: TERMINAL_COMPATIBILITY_PROFILE,
+    observeTerminal: async () => ({
+      agentSessionId: "session-1",
+      executionId: "execution-1",
+      observedAt: "2026-09-07T00:00:01.000Z",
+      signal: TERMINAL_SIGNAL,
+      finish: TERMINAL_OUTCOME,
+    }),
+    testing: {
+      fetchImpl: async () => {
+        posts += 1;
+        return new Response(JSON.stringify(admission()));
+      },
+      resolveProject: async () => ({ projectId: PROJECT_ID, gitRoot: "/repo" }),
+      eventId: EVENT_ID,
+    },
+  });
+
+  assert.equal(posts, 1);
+  assert.equal(existsSync(join(dataDir, "adapter-terminal-outbox.db")), false);
+  const completion = (result as unknown as { completion: Record<string, unknown> }).completion;
+  assert.equal(completion["attempted"], false);
+  assert.equal(completion["reason"], "COMPATIBILITY_PROFILE_MISMATCH");
+});
+
+test("legacy outbox capacity initializes once from unresolved reserved_bytes", async (t) => {
+  const dataDir = mkdtempSync(join(tmpdir(), "crucible-outbox-capacity-legacy-"));
+  t.after(() => rmSync(dataDir, { recursive: true, force: true }));
+  const legacy = new DatabaseSync(join(dataDir, "adapter-terminal-outbox.db"));
+  legacy.exec(`
+    CREATE TABLE terminal_outbox (
+      id TEXT PRIMARY KEY,
+      state TEXT NOT NULL,
+      reserved_bytes INTEGER NOT NULL,
+      accounted_bytes INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      agent_session_id TEXT NOT NULL,
+      execution_id TEXT NOT NULL,
+      compatibility_profile TEXT NOT NULL,
+      task_id TEXT,
+      input_id TEXT,
+      event_id TEXT UNIQUE,
+      envelope TEXT,
+      payload_hash TEXT,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      next_attempt_at INTEGER,
+      lease_until INTEGER,
+      last_diagnostic TEXT
+    ) STRICT;
+  `);
+  const insertLegacy = legacy.prepare(`
+    INSERT INTO terminal_outbox
+      (id, state, reserved_bytes, accounted_bytes, created_at,
+       agent_session_id, execution_id, compatibility_profile, task_id, input_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  insertLegacy.run("legacy-admitted", "admitted", 2048, 300, 1, "session-1", "execution-1",
+    TERMINAL_COMPATIBILITY_PROFILE, "task-1", "input-1");
+  insertLegacy.run("legacy-ready", "ready", 2048, 500, 2, "session-2", "execution-2",
+    TERMINAL_COMPATIBILITY_PROFILE, "task-2", "input-2");
+  legacy.close();
+
+  const outbox = await TerminalOutbox.open(policy(dataDir, { maxBytes: 4096 }));
+  try {
+    assert.equal(unresolvedCharge(outbox), 4096);
+    assert.equal(outbox.reserve("new", "new", TERMINAL_COMPATIBILITY_PROFILE), null);
+
+    outbox.storeCompletion("legacy-admitted", completionInput());
+    const database = new DatabaseSync(outbox.databasePath, { readOnly: true });
+    const ready = database
+      .prepare("SELECT state, accounted_bytes FROM terminal_outbox WHERE id = 'legacy-admitted'")
+      .get() as { state: string; accounted_bytes: number };
+    database.close();
+    assert.equal(ready.state, "ready");
+    assert.equal(ready.accounted_bytes, 2048);
+    assert.equal(unresolvedCharge(outbox), 4096);
+
+    const delivery = await outbox.deliver({ ...CORE_OPTIONS,
+      fetchImpl: async () => new Response(JSON.stringify(completionAck)),
+    }, "legacy-admitted");
+    assert.equal(delivery?.terminal, true);
+    assert.equal(unresolvedCharge(outbox), 2048);
+    assert.ok(outbox.reserve("new", "new", TERMINAL_COMPATIBILITY_PROFILE));
+  } finally {
+    outbox.close();
+  }
+});
+
+test("fixed reservation charge is stable across every unresolved state and released once", async (t) => {
+  const dataDir = mkdtempSync(join(tmpdir(), "crucible-outbox-charge-"));
+  t.after(() => rmSync(dataDir, { recursive: true, force: true }));
+  const outbox = await TerminalOutbox.open(policy(dataDir, { maxBytes: 4096 }));
+  try {
+    const reserved = outbox.reserve("session-1", "execution-1", TERMINAL_COMPATIBILITY_PROFILE)!;
+    assert.equal(unresolvedCharge(outbox), 2048);
+    outbox.bindAdmission(reserved, "task-1", "input-1");
+    assert.equal(unresolvedCharge(outbox), 2048);
+    const stored = outbox.storeCompletion(reserved, completionInput());
+    assert.ok(stored.bytes < 2048);
+    assert.equal(unresolvedCharge(outbox), 2048);
+
+    let leasedCharge: number | undefined;
+    await outbox.deliver({ ...CORE_OPTIONS, fetchImpl: async () => {
+      leasedCharge = unresolvedCharge(outbox);
+      throw new Error("lost");
+    } }, reserved);
+    assert.equal(leasedCharge, 2048);
+    assert.equal(unresolvedCharge(outbox), 2048);
+
+    const delivered = await outbox.deliver({ ...CORE_OPTIONS,
+      fetchImpl: async () => new Response(JSON.stringify(completionAck)),
+    }, reserved);
+    assert.equal(delivered?.terminal, true);
+    assert.equal(delivered?.accepted, true);
+    assert.equal(unresolvedCharge(outbox), 0);
+
+    const repeat = await outbox.deliver({ ...CORE_OPTIONS,
+      fetchImpl: async () => {
+        throw new Error("unexpected second ack");
+      },
+    }, reserved);
+    assert.equal(repeat, undefined);
+    assert.equal(unresolvedCharge(outbox), 0);
+  } finally {
+    outbox.close();
+  }
+});
+
+test("aborted obligations keep the fixed charge until a correlated abort ack", async (t) => {
+  const dataDir = mkdtempSync(join(tmpdir(), "crucible-outbox-charge-abort-"));
+  t.after(() => rmSync(dataDir, { recursive: true, force: true }));
+  const outbox = await TerminalOutbox.open(policy(dataDir, { maxBytes: 4096 }));
+  try {
+    const candidate = createCanonicalCandidate({
+      agentSessionId: "session-1", messageId: "input-1", executionId: "execution-1",
+      projectId: PROJECT_ID, gitRoot: "/repo", workspacePath: "/repo", delivery: "new",
+    }, { adapter: "opencode-v1", adapterVersion: "0.1.0", eventId: EVENT_ID });
+    const reservation = outbox.reserveCandidate({ candidate, agentSessionId: "session-1",
+      executionId: "execution-1", projectId: PROJECT_ID, gitRoot: "/repo", workspacePath: "/repo",
+      compatibilityProfile: TERMINAL_COMPATIBILITY_PROFILE, reconciliationDelayMs: 2000 })!;
+    outbox.bindAdmission(reservation, "task-1", "input-row-1");
+    assert.equal(unresolvedCharge(outbox), 2048);
+    outbox.markAdmissionAborted("session-1", "execution-1", "TERMINAL_SIGNAL_MISMATCH");
+    assert.equal(unresolvedCharge(outbox), 2048);
+
+    const abortDelivery = await outbox.deliver({ ...CORE_OPTIONS, fetchImpl: async (_url, init) => {
+      const posted = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response(JSON.stringify({ status: "ok", data: { event: {
+        event_id: posted["event_id"], status: "rejected", outcome: "rejected",
+        input_id: "input-row-1", task_id: "task-1", dispatch_authorized: false,
+      } } }));
+    } }, reservation);
+    assert.equal(abortDelivery?.terminal, true);
+    assert.equal(abortDelivery?.accepted, false);
+    assert.equal(unresolvedCharge(outbox), 0);
+    assert.ok(outbox.reserve("new", "new", TERMINAL_COMPATIBILITY_PROFILE));
+  } finally {
+    outbox.close();
+  }
+});
+
+test("capacity accounting is transactional across concurrent outbox connections", async (t) => {
+  const dataDir = mkdtempSync(join(tmpdir(), "crucible-outbox-concurrent-"));
+  t.after(() => rmSync(dataDir, { recursive: true, force: true }));
+  const shared = { maxBytes: 6144, reservationBytes: 2048 };
+  const a = await TerminalOutbox.open(policy(dataDir, shared));
+  const b = await TerminalOutbox.open(policy(dataDir, shared));
+  try {
+    const first = a.reserve("s1", "e1", TERMINAL_COMPATIBILITY_PROFILE)!;
+    assert.ok(b.reserve("s2", "e2", TERMINAL_COMPATIBILITY_PROFILE));
+    assert.ok(a.reserve("s3", "e3", TERMINAL_COMPATIBILITY_PROFILE));
+    assert.equal(unresolvedCharge(a), 6144);
+    assert.equal(b.reserve("s4", "e4", TERMINAL_COMPATIBILITY_PROFILE), null);
+    assert.equal(unresolvedCharge(b), 6144);
+
+    a.cancelReservation(first);
+    assert.equal(unresolvedCharge(a), 4096);
+    assert.ok(b.reserve("s4", "e4", TERMINAL_COMPATIBILITY_PROFILE));
+    assert.equal(unresolvedCharge(b), 6144);
+
+    const c = await TerminalOutbox.open(policy(dataDir, shared));
+    try {
+      assert.equal(unresolvedCharge(c), 6144);
+      assert.equal(c.reserve("s5", "e5", TERMINAL_COMPATIBILITY_PROFILE), null);
+    } finally {
+      c.close();
+    }
+  } finally {
+    a.close();
+    b.close();
+  }
+});
+
+test("oversized candidate envelope is rejected before the candidate POST and fails open", async (t) => {
+  const dataDir = mkdtempSync(join(tmpdir(), "crucible-outbox-oversized-"));
+  const terminalPolicy = policy(dataDir, { maxBytes: 4096 });
+  t.after(async () => {
+    await stopTerminalOutboxController(terminalPolicy);
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  let candidatePosts = 0;
+  const fetchImpl: FetchImpl = async (_url, init) => {
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    if (body["event_type"] === "input_candidate") candidatePosts += 1;
+    return new Response(JSON.stringify(admission()));
+  };
+  const result = await dispatchOpenCodeV1({ ...request(), prompt: "x".repeat(4096) },
+    { dispatch: async () => "sent" }, {
+      compatibilityProfile: TERMINAL_COMPATIBILITY_PROFILE,
+      terminalPolicy,
+      observeTerminal: async () => null,
+      testing: {
+        fetchImpl,
+        resolveProject: async () => ({ projectId: PROJECT_ID, gitRoot: "/repo" }),
+        eventId: EVENT_ID,
+      },
+    });
+
+  assert.equal(candidatePosts, 0);
+  assert.equal(result.dispatchResult, "sent");
+  assert.equal(result.tracked, false);
+  assert.equal((result as { diagnostic?: string }).diagnostic, "TERMINAL_CANDIDATE_OVERSIZED");
+
+  const outbox = await TerminalOutbox.open(terminalPolicy);
+  assert.equal(unresolvedCharge(outbox), 0);
+  assert.ok(outbox.reserve("new", "new", TERMINAL_COMPATIBILITY_PROFILE));
+  outbox.close();
 });

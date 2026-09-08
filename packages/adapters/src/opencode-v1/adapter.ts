@@ -10,7 +10,7 @@ import {
 } from "../runtime/core-client.js";
 import { resolveProject as defaultResolveProject } from "../runtime/project-resolver.js";
 import { runTrackedDispatch } from "../runtime/tracked-dispatch.js";
-import { startTerminalOutboxController, TERMINAL_ABORT_PERSISTED } from "../runtime/terminal-outbox.js";
+import { createTerminalOutboxPolicy, startTerminalOutboxController, TERMINAL_ABORT_PERSISTED } from "../runtime/terminal-outbox.js";
 import {
   ADAPTER,
   ADAPTER_VERSION,
@@ -120,7 +120,7 @@ export async function dispatchOpenCodeV1<T>(
   let outbox = options.terminalController;
   if (terminalEnabled && !outbox) {
     try {
-      outbox = startTerminalOutboxController(options.terminalPolicy!, {
+      outbox = await startTerminalOutboxController(createTerminalOutboxPolicy(options.terminalPolicy), {
         fetchImpl,
         coreUrl,
         timeoutMs,
@@ -164,6 +164,18 @@ export async function dispatchOpenCodeV1<T>(
     };
     const canonicalCandidate = createCanonicalCandidate(candidate, coreOptions);
     if (outbox) {
+      // An envelope larger than one reservation can never consume unreserved
+      // capacity; reject it before the candidate POST and continue untracked.
+      if (Buffer.byteLength(canonicalCandidate.envelope) > outbox.reservationBytes) {
+        return {
+          tracked: false as const,
+          outcome: "tracking_skipped",
+          diagnostic: "TERMINAL_CANDIDATE_OVERSIZED",
+          taskId: null,
+          inputId: null,
+          eventId,
+        };
+      }
       reservationId = outbox.reserveCandidate({
         candidate: canonicalCandidate,
         agentSessionId: request.agentSessionId,

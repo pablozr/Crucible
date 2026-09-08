@@ -1,6 +1,9 @@
 # Local documentation
 docs/
 
+# Local experiment harnesses and results
+experiments/
+
 # Node.js
 node_modules/
 packages/*/dist/

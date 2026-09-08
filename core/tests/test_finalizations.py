@@ -875,9 +875,31 @@ def test_future_observation_rejects_before_git(monkeypatch, tmp_path):
     assert detail["status"] == "running"
 
 
-def test_missing_window_config_is_fail_closed(monkeypatch, tmp_path):
+def test_missing_window_config_defaults_to_two_seconds(monkeypatch, tmp_path):
     monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.delenv(TERMINAL_WINDOW_ENV, raising=False)
+    root = tmp_path / "repo"
+    project_id = initialized_repository(root)
+    with TestClient(app) as client:
+        task_id = admit(client, project_id, root)
+        event = completion(project_id, root, task_id)
+        event["payload"]["terminal_observed_at"] = "2026-09-07T00:00:30Z"
+        event["payload"]["capture_not_after"] = "2026-09-07T00:01:00Z"
+
+        def _boom(*args: object, **kwargs: object) -> object:
+            raise AssertionError("default window must not read Git")
+
+        monkeypatch.setattr(finalization_service, "_capture_final", _boom)
+        response = client.post("/v1/events", json=event)
+        detail = client.get(f"/v1/tasks/{task_id}").json()["data"]["task"]
+    assert response.status_code == 400
+    assert response.json()["data"]["code"] == "INVALID_CAPTURE_WINDOW"
+    assert detail["status"] == "running"
+
+
+def test_invalid_window_config_is_fail_closed(monkeypatch, tmp_path):
+    monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv(TERMINAL_WINDOW_ENV, "not-a-number")
     root = tmp_path / "repo"
     project_id = initialized_repository(root)
     with TestClient(app) as client:

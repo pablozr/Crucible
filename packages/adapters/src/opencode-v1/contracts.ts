@@ -77,7 +77,9 @@ export type OpenCodeV1DispatchOptions = {
   adapterVersion?: string;
   compatibilityProfile?: string;
   observeTerminal?: TerminalObserver;
-  terminalPolicy?: TerminalOutboxPolicy;
+  // Partial policies receive the production defaults via
+  // createTerminalOutboxPolicy; complete injected test policies are preserved.
+  terminalPolicy?: Partial<TerminalOutboxPolicy>;
   terminalController?: TerminalOutboxController;
   testing?: OpenCodeV1Testing;
 };
