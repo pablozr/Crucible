@@ -10,7 +10,6 @@ from typing import Any
 from crucible_core.core.errors import FinalizationError
 from crucible_core.infrastructure.git.index_manifest import (
     build_canonical_manifest,
-    normalize_stored_manifest,
 )
 from crucible_core.schemas.persistence import (
     BaselineFileRow,
@@ -29,13 +28,17 @@ def capture_final(
     max_size: int,
     deadline: float,
 ) -> dict[str, Any]:
+    # baseline_index is retained for signature compatibility; index
+    # changes are allowed in slice 7.2 and final index is evidence only.
+    _ = baseline_index
     first = _git_state(root, deadline)
     _validate_supported_state(
-        first, baseline_head, baseline_branch, baseline_index
+        first, baseline_head, baseline_branch, root, deadline
     )
     evidence = _capture_paths(
         root,
         baseline_head,
+        first["head"],
         first["status"],
         baseline_files,
         max_size,
@@ -43,11 +46,12 @@ def capture_final(
     )
     second = _git_state(root, deadline)
     _validate_supported_state(
-        second, baseline_head, baseline_branch, baseline_index
+        second, baseline_head, baseline_branch, root, deadline
     )
     second_evidence = _capture_paths(
         root,
         baseline_head,
+        second["head"],
         second["status"],
         baseline_files,
         max_size,
@@ -65,24 +69,81 @@ def _validate_supported_state(
     state: dict[str, Any],
     baseline_head: str,
     baseline_branch: str,
-    baseline_index: bytes,
+    root: Path,
+    deadline: float,
 ) -> None:
     if state["branch"] != baseline_branch:
         raise FinalizationError("BRANCH_CHANGED_DURING_TASK")
     if state["head"] != baseline_head:
-        raise FinalizationError("UNSUPPORTED_HEAD_STATE")
-    if _normalize_index(state["index"]) != _normalize_index(baseline_index):
-        raise FinalizationError("UNSUPPORTED_INDEX_STATE")
+        _ensure_same_branch_advance(
+            root, baseline_head, state["head"], deadline
+        )
 
 
-def _normalize_index(value: bytes) -> bytes:
+def _ensure_same_branch_advance(
+    root: Path, baseline_head: str, final_head: str, deadline: float
+) -> None:
+    timeout = min(SUBPROCESS_TIMEOUT_SECONDS, deadline - time.monotonic())
+    if timeout <= 0:
+        raise FinalizationError("FINAL_SNAPSHOT_TIMEOUT")
     try:
-        normalized = normalize_stored_manifest(value)
-    except ValueError:
-        raise FinalizationError("FINAL_CAPTURE_FAILED") from None
-    if normalized is None:
-        raise FinalizationError("FINAL_CAPTURE_FAILED")
-    return normalized
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(root),
+                "merge-base",
+                "--is-ancestor",
+                baseline_head,
+                final_head,
+            ],
+            capture_output=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise FinalizationError("FINAL_SNAPSHOT_TIMEOUT") from error
+    if result.returncode == 0:
+        return
+    if result.returncode == 1:
+        raise FinalizationError("UNSUPPORTED_HEAD_STATE")
+    raise FinalizationError("BASELINE_OBJECT_UNAVAILABLE")
+
+
+_REGULAR_BLOB_MODES = frozenset({"100644", "100755"})
+_CLEAN_FINAL_STATUS = "  "
+
+
+def _head_changed_paths(
+    root: Path, baseline_head: str, final_head: str, deadline: float
+) -> set[str]:
+    if baseline_head == final_head:
+        return set()
+    try:
+        raw = _git(
+            root,
+            [
+                "diff",
+                "--name-only",
+                "-z",
+                "--no-renames",
+                baseline_head,
+                final_head,
+            ],
+            deadline,
+        )
+    except FinalizationError as error:
+        if error.code == "FINAL_CAPTURE_FAILED":
+            raise FinalizationError("BASELINE_OBJECT_UNAVAILABLE") from error
+        raise
+    paths: set[str] = set()
+    for chunk in raw.split(b"\0"):
+        if not chunk:
+            continue
+        try:
+            paths.add(chunk.decode("utf-8"))
+        except UnicodeDecodeError:
+            raise FinalizationError("UNSUPPORTED_FINAL_PATH") from None
+    return paths
 
 
 def _git_state(root: Path, deadline: float) -> dict[str, Any]:
@@ -119,6 +180,7 @@ def _git_state(root: Path, deadline: float) -> dict[str, Any]:
 def _capture_paths(
     root: Path,
     baseline_head: str,
+    final_head: str,
     final_status: bytes,
     baseline_files: list[BaselineFileRow],
     max_size: int,
@@ -126,7 +188,8 @@ def _capture_paths(
 ) -> dict[str, list[Any]]:
     initial_rows = {row.path: row for row in baseline_files}
     final_states = _parse_status(final_status)
-    paths = sorted(set(initial_rows) | set(final_states))
+    committed = _head_changed_paths(root, baseline_head, final_head, deadline)
+    paths = sorted(set(initial_rows) | set(final_states) | committed)
     frozen_baselines: list[BaselineFileRow] = []
     changes: list[TaskFileChangeRow] = []
 
@@ -140,15 +203,18 @@ def _capture_paths(
                 root,
                 baseline_head,
                 path,
-                final_states.get(path),
                 max_size,
                 deadline,
             )
             if initial is not None:
                 frozen_baselines.append(initial)
-        final = _read_final_file(
-            root, path, final_states.get(path), max_size, deadline
+        final = _read_final_head_file(
+            root, final_head, path, max_size, deadline
         )
+        if final_states.get(path) is not None:
+            final = _read_final_file(
+                root, path, final_states.get(path), max_size, deadline
+            )
         if _same_file(initial, final):
             continue
 
@@ -214,19 +280,85 @@ def _read_head_file(
     root: Path,
     head: str,
     path: str,
-    final_status: str | None,
     max_size: int,
     deadline: float,
 ) -> BaselineFileRow | None:
     try:
+        tree_out = _git(root, ["ls-tree", "-z", head, "--", path], deadline)
+    except FinalizationError as error:
+        if error.code == "FINAL_SNAPSHOT_TIMEOUT":
+            raise
+        raise FinalizationError("BASELINE_OBJECT_UNAVAILABLE") from error
+    matched = _match_tree_entry(tree_out, path)
+    if matched is None:
+        return None
+    _, kind = matched
+    if kind == "tree":
+        return None
+    try:
         content = _git(root, ["show", f"{head}:{path}"], deadline)
     except FinalizationError as error:
-        if error.code == "FINAL_CAPTURE_FAILED":
-            if final_status == "??":
-                return None
-            raise FinalizationError("BASELINE_OBJECT_UNAVAILABLE") from error
-        raise
+        if error.code == "FINAL_SNAPSHOT_TIMEOUT":
+            raise
+        if error.code != "FINAL_CAPTURE_FAILED":
+            raise
+        raise FinalizationError("BASELINE_OBJECT_UNAVAILABLE") from error
     return _file_row(path, "  ", content, max_size)
+
+
+def _read_final_head_file(
+    root: Path,
+    head: str,
+    path: str,
+    max_size: int,
+    deadline: float,
+) -> BaselineFileRow | None:
+    try:
+        tree_out = _git(root, ["ls-tree", "-z", head, "--", path], deadline)
+    except FinalizationError as error:
+        if error.code == "FINAL_SNAPSHOT_TIMEOUT":
+            raise
+        raise FinalizationError("BASELINE_OBJECT_UNAVAILABLE") from error
+    matched = _match_tree_entry(tree_out, path)
+    if matched is None:
+        return None
+    mode, kind = matched
+    if kind == "tree":
+        return None
+    if kind != "blob" or mode not in _REGULAR_BLOB_MODES:
+        raise FinalizationError("FINAL_SNAPSHOT_UNSTABLE")
+    try:
+        content = _git(root, ["show", f"{head}:{path}"], deadline)
+    except FinalizationError as error:
+        if error.code == "FINAL_SNAPSHOT_TIMEOUT":
+            raise
+        raise FinalizationError("BASELINE_OBJECT_UNAVAILABLE") from error
+    return _file_row(path, _CLEAN_FINAL_STATUS, content, max_size)
+
+
+def _match_tree_entry(
+    tree_out: bytes,
+    path: str,
+) -> tuple[str, str] | None:
+    target = path.encode("utf-8")
+    for record in tree_out.split(b"\0"):
+        if not record:
+            continue
+        meta, separator, name = record.partition(b"\t")
+        if not separator:
+            raise FinalizationError("BASELINE_OBJECT_UNAVAILABLE")
+        if name != target:
+            continue
+        parts = meta.split(b" ")
+        if len(parts) != 3:
+            raise FinalizationError("BASELINE_OBJECT_UNAVAILABLE")
+        try:
+            mode = parts[0].decode("ascii")
+            kind = parts[1].decode("ascii")
+        except UnicodeDecodeError:
+            raise FinalizationError("BASELINE_OBJECT_UNAVAILABLE") from None
+        return mode, kind
+    return None
 
 
 def _read_final_file(

@@ -128,6 +128,10 @@ def _git_repo(root: Path) -> str:
     subprocess.run(
         ["git", "-C", str(root), "config", "user.name", "T"], check=True
     )
+    subprocess.run(
+        ["git", "-C", str(root), "config", "core.autocrlf", "false"],
+        check=True,
+    )
     project_id = str(uuid.uuid4())
     directory = root / ".crucible"
     directory.mkdir()
@@ -317,7 +321,7 @@ def test_task_detail_normalizes_legacy_raw_manifest(
         assert absent["final_index_sha256"] is None
 
 
-def test_index_change_still_rejected_without_slice_72(
+def test_staged_worktree_change_completes_with_index_evidence(
     monkeypatch, tmp_path
 ) -> None:
     monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
@@ -329,6 +333,7 @@ def test_index_change_still_rejected_without_slice_72(
     with TestClient(app) as client:
         admitted = client.post("/v1/events", json=_candidate(project_id, root))
         task_id = admitted.json()["data"]["event"]["task_id"]
+        baseline = client.get(f"/v1/tasks/{task_id}").json()["data"]["task"]
         (root / "staged.txt").write_text("staged\n", encoding="utf-8")
         subprocess.run(
             ["git", "-C", str(root), "add", "staged.txt"], check=True
@@ -358,5 +363,12 @@ def test_index_change_still_rejected_without_slice_72(
             },
         }
         response = client.post("/v1/events", json=event)
-    assert response.status_code == 400
-    assert response.json()["data"]["code"] == "UNSUPPORTED_INDEX_STATE"
+        assert response.status_code == 200, response.text
+        detail = client.get(f"/v1/tasks/{task_id}").json()["data"]["task"]
+    assert detail["status"] == "completed"
+    assert (
+        detail["baseline_index_sha256"] == (baseline["baseline_index_sha256"])
+    )
+    assert detail["final_index_sha256"] != (detail["baseline_index_sha256"])
+    assert [item["path"] for item in detail["file_changes"]] == ["staged.txt"]
+    assert "+staged" in (detail["task_diff"] or "")

@@ -36,6 +36,10 @@ def initialized_repository(root: Path) -> str:
         ["git", "-C", str(root), "config", "user.name", "Test"],
         check=True,
     )
+    subprocess.run(
+        ["git", "-C", str(root), "config", "core.autocrlf", "false"],
+        check=True,
+    )
     project_id = str(uuid.uuid4())
     directory = root / ".crucible"
     directory.mkdir()
@@ -118,6 +122,7 @@ def test_completion_freezes_and_materializes_exact_task_diff(
     monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
     root = tmp_path / "repo"
     project_id = initialized_repository(root)
+    before_bytes = (root / "tracked.txt").read_bytes()
     with TestClient(app) as client:
         task_id = admit(client, project_id, root)
         (root / "tracked.txt").write_text("after\n", encoding="utf-8")
@@ -151,7 +156,7 @@ def test_completion_freezes_and_materializes_exact_task_diff(
         ).fetchone()[0]
     finally:
         connection.close()
-    assert gzip.decompress(frozen) == b"before\n"
+    assert gzip.decompress(frozen) == before_bytes
 
 
 @pytest.mark.parametrize(
@@ -259,8 +264,7 @@ def test_stale_generation_cannot_publish(monkeypatch, tmp_path):
     ("mutation", "code"),
     [
         ("branch", "BRANCH_CHANGED_DURING_TASK"),
-        ("head", "UNSUPPORTED_HEAD_STATE"),
-        ("index", "UNSUPPORTED_INDEX_STATE"),
+        ("detached", "UNSUPPORTED_HEAD_STATE"),
     ],
 )
 def test_unsupported_git_states_fail_without_freezing(
@@ -277,17 +281,11 @@ def test_unsupported_git_states_fail_without_freezing(
                 check=True,
                 capture_output=True,
             )
-        elif mutation == "head":
-            (root / "commit.txt").write_text("commit\n", encoding="utf-8")
-            subprocess.run(["git", "-C", str(root), "add", "."], check=True)
-            subprocess.run(
-                ["git", "-C", str(root), "commit", "--quiet", "-m", "next"],
-                check=True,
-            )
         else:
-            (root / "staged.txt").write_text("staged\n", encoding="utf-8")
             subprocess.run(
-                ["git", "-C", str(root), "add", "staged.txt"], check=True
+                ["git", "-C", str(root), "switch", "--detach", "HEAD"],
+                check=True,
+                capture_output=True,
             )
         response = client.post(
             "/v1/events", json=completion(project_id, root, task_id)
@@ -1270,3 +1268,217 @@ def test_abort_on_finalizing_fails_closed(monkeypatch, tmp_path):
     assert response.status_code == 409
     assert response.json()["data"]["code"] == "TASK_NOT_RUNNING"
     assert detail["status"] == "finalizing"
+
+
+def test_index_only_empty_diff_with_index_evidence(monkeypatch, tmp_path):
+    monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
+    root = tmp_path / "repo"
+    project_id = initialized_repository(root)
+    with TestClient(app) as client:
+        task_id = admit(client, project_id, root)
+        baseline = client.get(f"/v1/tasks/{task_id}").json()["data"]["task"]
+        (root / "staged.txt").write_text("staged\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", str(root), "add", "staged.txt"], check=True
+        )
+        (root / "staged.txt").unlink()
+        response = client.post(
+            "/v1/events", json=completion(project_id, root, task_id)
+        )
+        assert response.status_code == 200, response.text
+        detail = client.get(f"/v1/tasks/{task_id}").json()["data"]["task"]
+    assert detail["status"] == "completed"
+    assert (detail["task_diff"] or "") == ""
+    assert detail["file_changes"] == []
+    assert (
+        detail["baseline_index_sha256"] == (baseline["baseline_index_sha256"])
+    )
+    assert detail["final_index_sha256"] != (detail["baseline_index_sha256"])
+    assert detail["final_head"] == detail["baseline_head"]
+
+
+def test_staged_plus_unstaged_partial_stage_diff(monkeypatch, tmp_path):
+    monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
+    root = tmp_path / "repo"
+    project_id = initialized_repository(root)
+    with TestClient(app) as client:
+        task_id = admit(client, project_id, root)
+        (root / "tracked.txt").write_text("staged\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", str(root), "add", "tracked.txt"], check=True
+        )
+        (root / "tracked.txt").write_text(
+            "staged plus unstaged\n", encoding="utf-8"
+        )
+        response = client.post(
+            "/v1/events", json=completion(project_id, root, task_id)
+        )
+        assert response.status_code == 200, response.text
+        detail = client.get(f"/v1/tasks/{task_id}").json()["data"]["task"]
+    assert detail["status"] == "completed"
+    assert [item["path"] for item in detail["file_changes"]] == ["tracked.txt"]
+    assert "-before" in detail["task_diff"]
+    assert "+staged plus unstaged" in detail["task_diff"]
+    assert detail["final_index_sha256"] != (detail["baseline_index_sha256"])
+
+
+def test_same_branch_commit_final_clean_includes_diff(monkeypatch, tmp_path):
+    monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
+    root = tmp_path / "repo"
+    project_id = initialized_repository(root)
+    with TestClient(app) as client:
+        task_id = admit(client, project_id, root)
+        (root / "tracked.txt").write_text("after\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+        subprocess.run(
+            ["git", "-C", str(root), "commit", "--quiet", "-m", "task"],
+            check=True,
+        )
+        response = client.post(
+            "/v1/events", json=completion(project_id, root, task_id)
+        )
+        assert response.status_code == 200, response.text
+        detail = client.get(f"/v1/tasks/{task_id}").json()["data"]["task"]
+    assert detail["status"] == "completed"
+    assert detail["final_head"] != detail["baseline_head"]
+    assert [item["path"] for item in detail["file_changes"]] == ["tracked.txt"]
+    assert "-before" in detail["task_diff"]
+    assert "+after" in detail["task_diff"]
+
+
+def test_commit_preexisting_without_mutation_empty_diff(monkeypatch, tmp_path):
+    monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
+    root = tmp_path / "repo"
+    project_id = initialized_repository(root)
+    (root / "tracked.txt").write_text("preexisting\n", encoding="utf-8")
+    with TestClient(app) as client:
+        task_id = admit(client, project_id, root)
+        subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+        subprocess.run(
+            ["git", "-C", str(root), "commit", "--quiet", "-m", "pre"],
+            check=True,
+        )
+        response = client.post(
+            "/v1/events", json=completion(project_id, root, task_id)
+        )
+        assert response.status_code == 200, response.text
+        detail = client.get(f"/v1/tasks/{task_id}").json()["data"]["task"]
+    assert detail["status"] == "completed"
+    assert detail["final_head"] != detail["baseline_head"]
+    assert (detail["task_diff"] or "") == ""
+    assert detail["file_changes"] == []
+
+
+def test_committed_file_to_directory_reports_delete_plus_add(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
+    root = tmp_path / "repo"
+    project_id = initialized_repository(root)
+    with TestClient(app) as client:
+        task_id = admit(client, project_id, root)
+        (root / "tracked.txt").unlink()
+        (root / "tracked.txt").mkdir()
+        (root / "tracked.txt" / "nested.txt").write_text(
+            "nested\n", encoding="utf-8"
+        )
+        subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+        subprocess.run(
+            ["git", "-C", str(root), "commit", "--quiet", "-m", "file to dir"],
+            check=True,
+        )
+        response = client.post(
+            "/v1/events", json=completion(project_id, root, task_id)
+        )
+        assert response.status_code == 200, response.text
+        detail = client.get(f"/v1/tasks/{task_id}").json()["data"]["task"]
+    assert detail["status"] == "completed"
+    assert detail["final_head"] != detail["baseline_head"]
+    by_path = {item["path"]: item for item in detail["file_changes"]}
+    assert by_path["tracked.txt"]["operation"] == "deleted"
+    assert by_path["tracked.txt/nested.txt"]["operation"] == "added"
+    assert "tracked.txt" in (detail["task_diff"] or "")
+
+
+def test_committed_case_only_rename_reports_delete_plus_add(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
+    root = tmp_path / "repo"
+    project_id = initialized_repository(root)
+    with TestClient(app) as client:
+        task_id = admit(client, project_id, root)
+        renamed = subprocess.run(
+            ["git", "-C", str(root), "mv", "tracked.txt", "TRACKED.txt"],
+            capture_output=True,
+        )
+        if renamed.returncode != 0:
+            pytest.skip("filesystem does not support case-only rename")
+        subprocess.run(
+            ["git", "-C", str(root), "commit", "--quiet", "-m", "case rename"],
+            check=True,
+        )
+        probe = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(root),
+                "diff",
+                "--name-only",
+                "--no-renames",
+                "HEAD~1",
+                "HEAD",
+                "--",
+            ],
+            capture_output=True,
+            check=True,
+        )
+        names = set(probe.stdout.decode("utf-8").splitlines())
+        if {"tracked.txt", "TRACKED.txt"} - names:
+            pytest.skip("filesystem does not expose both rename sides")
+        response = client.post(
+            "/v1/events", json=completion(project_id, root, task_id)
+        )
+        assert response.status_code == 200, response.text
+        detail = client.get(f"/v1/tasks/{task_id}").json()["data"]["task"]
+    assert detail["status"] == "completed"
+    assert detail["final_head"] != detail["baseline_head"]
+    by_path = {item["path"]: item for item in detail["file_changes"]}
+    assert by_path["tracked.txt"]["operation"] == "deleted"
+    assert by_path["TRACKED.txt"]["operation"] == "added"
+
+
+def test_committed_directory_to_file_reports_delete_plus_add(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
+    root = tmp_path / "repo"
+    project_id = initialized_repository(root)
+    (root / "target").mkdir()
+    (root / "target" / "nested.txt").write_text("nested\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(
+        ["git", "-C", str(root), "commit", "--quiet", "-m", "baseline dir"],
+        check=True,
+    )
+    with TestClient(app) as client:
+        task_id = admit(client, project_id, root)
+        (root / "target" / "nested.txt").unlink()
+        (root / "target").rmdir()
+        (root / "target").write_text("nowfile\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+        subprocess.run(
+            ["git", "-C", str(root), "commit", "--quiet", "-m", "dir to file"],
+            check=True,
+        )
+        response = client.post(
+            "/v1/events", json=completion(project_id, root, task_id)
+        )
+        assert response.status_code == 200, response.text
+        detail = client.get(f"/v1/tasks/{task_id}").json()["data"]["task"]
+    assert detail["status"] == "completed"
+    assert detail["final_head"] != detail["baseline_head"]
+    by_path = {item["path"]: item for item in detail["file_changes"]}
+    assert by_path["target"]["operation"] == "added"
+    assert by_path["target/nested.txt"]["operation"] == "deleted"
+    assert "target" in (detail["task_diff"] or "")
