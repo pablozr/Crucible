@@ -28,7 +28,7 @@ def test_health_and_status(monkeypatch, tmp_path):
     }
     assert status.json()["data"]["system"]["database"] == {
         "path": str(tmp_path / "crucible.db"),
-        "migration_revision": "0006",
+        "migration_revision": "0007",
         "journal_mode": "wal",
         "synchronous": "full",
         "foreign_keys": True,

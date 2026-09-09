@@ -24,7 +24,7 @@ def test_migrations_upgrade_fresh_database_to_head(tmp_path):
 
 
 def test_migrations_upgrade_supported_previous_versions_to_head(tmp_path):
-    for revision in ("0001", "0002", "0003", "0004", "0005"):
+    for revision in ("0001", "0002", "0003", "0004", "0005", "0006"):
         database_path = tmp_path / f"{revision}.db"
         _upgrade(database_path, revision)
         if revision == "0001":
@@ -64,10 +64,25 @@ def _assert_head_tables(database_path) -> None:
             .mappings()
             .fetchall()
         }
+        baseline_columns = {
+            item["name"]
+            for item in connection.exec_driver_sql(
+                "PRAGMA table_info(task_baseline_files)"
+            )
+            .mappings()
+            .fetchall()
+        }
     assert row
-    assert revision == "0006"
+    assert revision == "0007"
     assert decisions
     assert {"path", "final_content", "patch"} <= final_columns
+    assert {
+        "baseline_mode",
+        "baseline_gitlink_oid",
+        "final_mode",
+        "final_gitlink_oid",
+    } <= final_columns
+    assert {"mode", "gitlink_oid"} <= baseline_columns
     with engine.connect() as connection:
         task_columns = {
             item["name"]

@@ -110,6 +110,10 @@ class TaskFileChangeRow(BaseModel):
     evidence_status: str
     evidence_reason: str | None = None
     patch: str | None = None
+    baseline_mode: str | None = None
+    baseline_gitlink_oid: str | None = None
+    final_mode: str | None = None
+    final_gitlink_oid: str | None = None
 
 
 class BaselineFileRow(BaseModel):
@@ -119,6 +123,8 @@ class BaselineFileRow(BaseModel):
     size: int | None = None
     is_binary: int | None = None
     content: bytes | None = None
+    mode: str | None = None
+    gitlink_oid: str | None = None
 
 
 class StoredInput(BaseModel):

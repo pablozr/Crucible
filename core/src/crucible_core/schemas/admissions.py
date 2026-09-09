@@ -58,6 +58,8 @@ class BaselineFile(BaseModel):
     size: int | None = None
     is_binary: bool | None = None
     content: str | None = None
+    mode: str | None = None
+    gitlink_oid: str | None = None
 
 
 class TaskFileChange(BaseModel):
@@ -70,6 +72,10 @@ class TaskFileChange(BaseModel):
     evidence_status: str
     evidence_reason: str | None = None
     patch: str | None = None
+    baseline_mode: str | None = None
+    baseline_gitlink_oid: str | None = None
+    final_mode: str | None = None
+    final_gitlink_oid: str | None = None
 
 
 class TaskDetail(TaskSummary):

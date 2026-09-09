@@ -101,6 +101,24 @@ def _replay_status(code: str) -> int:
     return 400
 
 
+_ALLOWED_PARTIAL_EVIDENCE = frozenset({"complete", "hash_only", "unsupported"})
+
+
+def _evidence_completeness(changes: list[TaskFileChangeRow]) -> str:
+    # Honest Task completeness: completed+complete only when every
+    # change is complete; completed+partial for structural/hash-only
+    # honestly captured; unavailable forces failure before freeze.
+    if any(row.evidence_status == "unavailable" for row in changes):
+        return "unavailable"
+    if all(row.evidence_status == "complete" for row in changes):
+        return "complete"
+    if all(
+        row.evidence_status in _ALLOWED_PARTIAL_EVIDENCE for row in changes
+    ):
+        return "partial"
+    return "unavailable"
+
+
 def _parse_utc_timestamp(value: object, code: str) -> datetime:
     if not isinstance(value, str) or not value:
         raise FinalizationError(code)
@@ -651,6 +669,10 @@ class FinalizationCoordinator:
             if self._monotonic() >= deadline:
                 connection.rollback()
                 raise FinalizationError("FINAL_SNAPSHOT_TIMEOUT")
+            completeness = _evidence_completeness(snapshot.changes)
+            if completeness == "unavailable":
+                connection.rollback()
+                raise FinalizationError("BASELINE_OBJECT_UNAVAILABLE")
             changed = connection.execute(
                 "UPDATE tasks SET final_head = ?, final_branch = ?, "
                 "final_status = ?, final_index_manifest = ?, "
@@ -663,12 +685,7 @@ class FinalizationCoordinator:
                     snapshot.status,
                     snapshot.index,
                     frozen_at,
-                    "complete"
-                    if all(
-                        row.evidence_status == "complete"
-                        for row in snapshot.changes
-                    )
-                    else "partial",
+                    completeness,
                     task_id,
                     generation,
                 ),

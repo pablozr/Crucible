@@ -139,6 +139,8 @@ def task_detail(
                 content=base64.b64encode(item.content).decode()
                 if item.content
                 else None,
+                mode=item.mode,
+                gitlink_oid=item.gitlink_oid,
             )
             for item in files
         ],
@@ -171,6 +173,10 @@ def task_detail(
                 evidence_status=item.evidence_status,
                 evidence_reason=item.evidence_reason,
                 patch=item.patch,
+                baseline_mode=item.baseline_mode,
+                baseline_gitlink_oid=item.baseline_gitlink_oid,
+                final_mode=item.final_mode,
+                final_gitlink_oid=item.final_gitlink_oid,
             )
             for item in changes
         ],

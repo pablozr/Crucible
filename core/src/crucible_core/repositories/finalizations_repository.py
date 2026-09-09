@@ -183,8 +183,9 @@ def insert_baseline_file(
 ) -> None:
     connection.execute(
         "INSERT OR IGNORE INTO task_baseline_files "
-        "(id, task_id, path, status, sha256, size, is_binary, content) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "(id, task_id, path, status, sha256, size, is_binary, content, "
+        "mode, gitlink_oid) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             str(uuid.uuid4()),
             task_id,
@@ -194,6 +195,8 @@ def insert_baseline_file(
             row.size,
             row.is_binary,
             row.content,
+            row.mode,
+            row.gitlink_oid,
         ),
     )
 
@@ -207,7 +210,9 @@ def insert_file_change(
         "INSERT INTO task_file_changes "
         "(id, task_id, path, operation, final_status, final_sha256, "
         "final_size, final_is_binary, final_content, evidence_status, "
-        "evidence_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "evidence_reason, baseline_mode, baseline_gitlink_oid, "
+        "final_mode, final_gitlink_oid) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             str(uuid.uuid4()),
             task_id,
@@ -220,6 +225,10 @@ def insert_file_change(
             row.final_content,
             row.evidence_status,
             row.evidence_reason,
+            row.baseline_mode,
+            row.baseline_gitlink_oid,
+            row.final_mode,
+            row.final_gitlink_oid,
         ),
     )
 

@@ -328,8 +328,8 @@ def insert_task_baseline_file(
     connection.execute(
         "INSERT INTO task_baseline_files "
         "(id, task_id, path, status, sha256, size, is_binary, "
-        "content) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "content, mode, gitlink_oid) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             file_id,
             task_id,
@@ -339,17 +339,36 @@ def insert_task_baseline_file(
             baseline_file.size,
             baseline_file.is_binary,
             baseline_file.content,
+            baseline_file.mode,
+            baseline_file.gitlink_oid,
         ),
     )
+
+
+def _baseline_file_columns(connection: sqlite3.Connection) -> set[str]:
+    return {
+        item["name"]
+        for item in connection.execute(
+            "PRAGMA table_info(task_baseline_files)"
+        ).fetchall()
+    }
 
 
 def list_task_baseline_files(
     connection: sqlite3.Connection, task_id: str
 ) -> list[BaselineFileRow]:
     connection.row_factory = sqlite3.Row
+    columns = _baseline_file_columns(connection)
+    mode_select = "mode AS mode," if "mode" in columns else "NULL AS mode,"
+    oid_select = (
+        "gitlink_oid AS gitlink_oid"
+        if "gitlink_oid" in columns
+        else "NULL AS gitlink_oid"
+    )
     rows = connection.execute(
         "SELECT path AS path, status AS status, sha256 AS sha256, "
-        "size AS size, is_binary AS is_binary, content AS content "
+        "size AS size, is_binary AS is_binary, content AS content, "
+        f"{mode_select} {oid_select} "
         "FROM task_baseline_files WHERE task_id = ? ORDER BY path",
         (task_id,),
     ).fetchall()
@@ -362,6 +381,8 @@ def list_task_baseline_files(
             size=row["size"],
             is_binary=row["is_binary"],
             content=row["content"],
+            mode=row["mode"],
+            gitlink_oid=row["gitlink_oid"],
         )
         for row in rows
     ]
@@ -416,14 +437,45 @@ def get_finalization_task(
     )
 
 
+def _file_change_columns(connection: sqlite3.Connection) -> set[str]:
+    return {
+        item["name"]
+        for item in connection.execute(
+            "PRAGMA table_info(task_file_changes)"
+        ).fetchall()
+    }
+
+
 def list_task_file_changes(
     connection: sqlite3.Connection, task_id: str
 ) -> list[TaskFileChangeRow]:
     connection.row_factory = sqlite3.Row
+    columns = _file_change_columns(connection)
+    baseline_mode = (
+        "baseline_mode AS baseline_mode,"
+        if "baseline_mode" in columns
+        else "NULL AS baseline_mode,"
+    )
+    baseline_oid = (
+        "baseline_gitlink_oid AS baseline_gitlink_oid,"
+        if "baseline_gitlink_oid" in columns
+        else "NULL AS baseline_gitlink_oid,"
+    )
+    final_mode = (
+        "final_mode AS final_mode,"
+        if "final_mode" in columns
+        else "NULL AS final_mode,"
+    )
+    final_oid = (
+        "final_gitlink_oid AS final_gitlink_oid"
+        if "final_gitlink_oid" in columns
+        else "NULL AS final_gitlink_oid"
+    )
     rows = connection.execute(
         "SELECT path, operation, final_status, final_sha256, final_size, "
         "final_is_binary, final_content, evidence_status, "
-        "evidence_reason, patch FROM task_file_changes "
+        f"evidence_reason, patch, {baseline_mode} {baseline_oid} "
+        f"{final_mode} {final_oid} FROM task_file_changes "
         "WHERE task_id = ? ORDER BY path",
         (task_id,),
     ).fetchall()
@@ -439,6 +491,10 @@ def list_task_file_changes(
             evidence_status=row["evidence_status"],
             evidence_reason=row["evidence_reason"],
             patch=row["patch"],
+            baseline_mode=row["baseline_mode"],
+            baseline_gitlink_oid=row["baseline_gitlink_oid"],
+            final_mode=row["final_mode"],
+            final_gitlink_oid=row["final_gitlink_oid"],
         )
         for row in rows
     ]

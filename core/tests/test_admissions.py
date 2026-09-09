@@ -159,6 +159,8 @@ def test_dirty_baseline_is_frozen_before_task_admission(monkeypatch, tmp_path):
             "size": len("before agent"),
             "is_binary": False,
             "content": task["baseline_files"][0]["content"],
+            "mode": None,
+            "gitlink_oid": None,
         }
     ]
 
