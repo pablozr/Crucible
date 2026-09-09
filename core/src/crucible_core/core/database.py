@@ -16,6 +16,7 @@ def connect(path: Path) -> sqlite3.Connection:
         path.parent.chmod(0o700)
 
     connection = sqlite3.connect(path)
+    connection.row_factory = sqlite3.Row
 
     connection.execute("PRAGMA foreign_keys = ON")
     connection.execute("PRAGMA journal_mode = WAL")
@@ -45,21 +46,28 @@ def upgrade(path: Path) -> None:
 
 def database_status(path: Path) -> dict[str, object]:
     with connect(path) as connection:
-        revision = connection.execute(
-            "SELECT version_num FROM alembic_version"
-        ).fetchone()[0]
+        revision_row = connection.execute(
+            "SELECT version_num AS version_num FROM alembic_version"
+        ).fetchone()
+        assert revision_row is not None
+        revision = revision_row["version_num"]
+
+        journal_row = connection.execute("PRAGMA journal_mode").fetchone()
+        assert journal_row is not None
+        journal_mode = journal_row["journal_mode"]
+
+        synchronous_row = connection.execute("PRAGMA synchronous").fetchone()
+        assert synchronous_row is not None
+
+        foreign_keys_row = connection.execute("PRAGMA foreign_keys").fetchone()
+        assert foreign_keys_row is not None
 
         return {
             "path": str(path),
             "migration_revision": revision,
-            "journal_mode": connection.execute(
-                "PRAGMA journal_mode"
-            ).fetchone()[0],
+            "journal_mode": journal_mode,
             "synchronous": "full"
-            if connection.execute("PRAGMA synchronous").fetchone()[0] == 2
+            if synchronous_row["synchronous"] == 2
             else "unknown",
-            "foreign_keys": connection.execute(
-                "PRAGMA foreign_keys"
-            ).fetchone()[0]
-            == 1,
+            "foreign_keys": foreign_keys_row["foreign_keys"] == 1,
         }

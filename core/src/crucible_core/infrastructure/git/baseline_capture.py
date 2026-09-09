@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -13,6 +14,10 @@ from crucible_core.infrastructure.git.index_manifest import (
     build_canonical_manifest,
 )
 from crucible_core.logging import get_logger
+from crucible_core.schemas.git import (
+    BaselineCaptureSnapshot,
+    HashedContent,
+)
 from crucible_core.schemas.persistence import BaselineFileRow
 
 SUBPROCESS_TIMEOUT_SECONDS = 0.5
@@ -29,7 +34,7 @@ def capture_baseline(
     *,
     clock: Callable[[], float] | None = None,
     opener: Callable[..., Any] | None = None,
-) -> dict[str, Any]:
+) -> BaselineCaptureSnapshot:
     from crucible_core.core.errors import AdmissionError
 
     tick = clock or time.monotonic
@@ -43,7 +48,7 @@ def capture_baseline(
             first = _git_state(root, deadline, tick)
             files = _snapshot_files(
                 root,
-                first["status"],
+                first.status,
                 max_size,
                 deadline,
                 tick,
@@ -53,7 +58,7 @@ def capture_baseline(
             second = _git_state(root, deadline, tick)
             second_files = _snapshot_files(
                 root,
-                second["status"],
+                second.status,
                 max_size,
                 deadline,
                 tick,
@@ -70,14 +75,13 @@ def capture_baseline(
         if first == second and _file_identity(files) == _file_identity(
             second_files
         ):
-            first["files"] = files
-            return first
+            return replace(first, files=files)
     raise AdmissionError("BASELINE_UNSTABLE")
 
 
 def _git_state(
     root: Path, deadline: float, tick: Callable[[], float]
-) -> dict[str, Any]:
+) -> BaselineCaptureSnapshot:
     from crucible_core.core.errors import AdmissionError
 
     try:
@@ -105,17 +109,17 @@ def _git_state(
         logger.warning("git index failed code=BASELINE_CAPTURE_FAILED")
         raise AdmissionError("BASELINE_CAPTURE_FAILED") from None
 
-    return {
-        "head": head.decode().strip(),
-        "branch": branch.decode().strip(),
-        "status": _git(
+    return BaselineCaptureSnapshot(
+        head=head.decode().strip(),
+        branch=branch.decode().strip(),
+        status=_git(
             root,
             ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
             deadline,
             tick,
         ),
-        "index": index,
-    }
+        index=index,
+    )
 
 
 def _git(
@@ -182,7 +186,7 @@ def _snapshot_files(
         try:
             if not target.is_file() or target.is_symlink():
                 raise OSError
-            digest, size, binary, saved = _hash_worktree_file(
+            hashed = _hash_worktree_file(
                 target,
                 max_size,
                 deadline,
@@ -209,10 +213,12 @@ def _snapshot_files(
             BaselineFileRow(
                 path=str(path),
                 status=xy,
-                sha256=digest,
-                size=size,
-                is_binary=binary,
-                content=saved,
+                sha256=hashed.sha256,
+                size=hashed.size,
+                is_binary=hashed.is_binary,
+                content=(
+                    bytes(hashed.data) if hashed.data is not None else None
+                ),
             )
         )
     return rows
@@ -226,7 +232,7 @@ def _hash_worktree_file(
     open_fn: Callable[..., Any],
     budget: HashBudget,
     file_started_at: float,
-) -> tuple[str, int, int, bytes | None]:
+) -> HashedContent:
     from crucible_core.core.errors import AdmissionError
 
     return hash_worktree_file(

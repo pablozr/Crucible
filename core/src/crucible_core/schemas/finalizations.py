@@ -5,6 +5,7 @@ from typing import Any
 
 from crucible_core.schemas.persistence import (
     BaselineFileRow,
+    FinalizationTask,
     TaskFileChangeRow,
 )
 
@@ -53,6 +54,22 @@ class FinalCaptureSnapshot:
             baseline_files=list(payload.get("baseline_files") or []),
             changes=list(payload.get("changes") or []),
         )
+
+
+@dataclass(frozen=True)
+class BeginFinalizationResult:
+    """Named result of ``_begin`` (no positional tuple)."""
+
+    generation: int
+    task: FinalizationTask
+    input_row_id: str
+
+
+@dataclass(frozen=True)
+class BeginReplayed:
+    """Explicit replay branch for ``_begin`` (no bare dict union)."""
+
+    response: dict[str, object]
 
 
 @dataclass(frozen=True)

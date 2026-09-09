@@ -3,6 +3,7 @@ from __future__ import annotations
 import gzip
 import subprocess
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -15,6 +16,8 @@ from crucible_core.infrastructure.git.content_hash import (
 from crucible_core.infrastructure.git.index_manifest import (
     build_canonical_manifest,
 )
+from crucible_core.schemas.finalizations import FinalCaptureSnapshot
+from crucible_core.schemas.git import HashedContent
 from crucible_core.schemas.persistence import (
     BaselineFileRow,
     TaskFileChangeRow,
@@ -23,6 +26,18 @@ from crucible_core.schemas.persistence import (
 SUBPROCESS_TIMEOUT_SECONDS = 2
 HASH_PER_FILE_BUDGET_SECONDS = 2.0
 HASH_AGGREGATE_BUDGET_SECONDS = 3.0
+
+
+@dataclass
+class _PathEvidence:
+    baseline_files: list[BaselineFileRow] = field(default_factory=list)
+    changes: list[TaskFileChangeRow] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class _TreeEntry:
+    mode: str
+    kind: str
 
 
 def capture_final(
@@ -36,7 +51,7 @@ def capture_final(
     *,
     clock: Callable[[], float] | None = None,
     opener: Callable[..., Any] | None = None,
-) -> dict[str, Any]:
+) -> FinalCaptureSnapshot:
     # baseline_index is retained for signature compatibility; index
     # changes are allowed in slice 7.2 and final index is evidence only.
     _ = baseline_index
@@ -56,8 +71,8 @@ def capture_final(
             evidence = _capture_paths(
                 root,
                 baseline_head,
-                first["head"],
-                first["status"],
+                first.head,
+                first.status,
                 baseline_files,
                 max_size,
                 deadline,
@@ -72,8 +87,8 @@ def capture_final(
             second_evidence = _capture_paths(
                 root,
                 baseline_head,
-                second["head"],
-                second["status"],
+                second.head,
+                second.status,
                 baseline_files,
                 max_size,
                 deadline,
@@ -92,7 +107,14 @@ def capture_final(
             unstable = FinalizationError("FINAL_SNAPSHOT_UNSTABLE")
             continue
 
-        return {**first, **evidence}
+        return FinalCaptureSnapshot(
+            head=first.head,
+            branch=first.branch,
+            status=first.status,
+            index=first.index,
+            baseline_files=list(evidence.baseline_files),
+            changes=list(evidence.changes),
+        )
     raise (
         unstable
         if unstable is not None
@@ -101,18 +123,18 @@ def capture_final(
 
 
 def _validate_supported_state(
-    state: dict[str, Any],
+    state: FinalCaptureSnapshot,
     baseline_head: str,
     baseline_branch: str,
     root: Path,
     deadline: float,
     tick: Callable[[], float],
 ) -> None:
-    if state["branch"] != baseline_branch:
+    if state.branch != baseline_branch:
         raise FinalizationError("BRANCH_CHANGED_DURING_TASK")
-    if state["head"] != baseline_head:
+    if state.head != baseline_head:
         _ensure_same_branch_advance(
-            root, baseline_head, state["head"], deadline, tick
+            root, baseline_head, state.head, deadline, tick
         )
 
 
@@ -199,7 +221,7 @@ def _head_changed_paths(
 
 def _git_state(
     root: Path, deadline: float, tick: Callable[[], float]
-) -> dict[str, Any]:
+) -> FinalCaptureSnapshot:
     try:
         head = _git(root, ["rev-parse", "--verify", "HEAD"], deadline, tick)
         branch = _git(
@@ -219,17 +241,17 @@ def _git_state(
         index = build_canonical_manifest(raw_index)
     except ValueError:
         raise FinalizationError("FINAL_CAPTURE_FAILED") from None
-    return {
-        "head": head.decode().strip(),
-        "branch": branch.decode().strip(),
-        "status": _git(
+    return FinalCaptureSnapshot(
+        head=head.decode().strip(),
+        branch=branch.decode().strip(),
+        status=_git(
             root,
             ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
             deadline,
             tick,
         ),
-        "index": index,
-    }
+        index=index,
+    )
 
 
 def _capture_paths(
@@ -243,7 +265,7 @@ def _capture_paths(
     tick: Callable[[], float],
     open_fn: Callable[..., Any],
     budget: HashBudget,
-) -> dict[str, list[Any]]:
+) -> _PathEvidence:
     initial_rows = {row.path: row for row in baseline_files}
     final_states = _parse_status(final_status)
     committed = _head_changed_paths(
@@ -307,7 +329,7 @@ def _capture_paths(
                 evidence_reason=_evidence_reason(initial, final),
             )
         )
-    return {"baseline_files": frozen_baselines, "changes": changes}
+    return _PathEvidence(baseline_files=frozen_baselines, changes=changes)
 
 
 def _parse_status(status: bytes) -> dict[str, str]:
@@ -326,11 +348,11 @@ def _parse_status(status: bytes) -> dict[str, str]:
 
 
 def _evidence_identity(
-    evidence: dict[str, list[Any]],
+    evidence: _PathEvidence,
 ) -> tuple[list[tuple[Any, ...]], list[tuple[Any, ...]]]:
     baselines = [
         (row.path, row.status, row.sha256, row.size)
-        for row in evidence["baseline_files"]
+        for row in evidence.baseline_files
     ]
     changes = [
         (
@@ -342,7 +364,7 @@ def _evidence_identity(
             row.evidence_status,
             row.evidence_reason,
         )
-        for row in evidence["changes"]
+        for row in evidence.changes
     ]
     return baselines, changes
 
@@ -367,8 +389,7 @@ def _read_head_file(
     matched = _match_tree_entry(tree_out, path)
     if matched is None:
         return None
-    _, kind = matched
-    if kind == "tree":
+    if matched.kind == "tree":
         return None
     return _stream_git_blob_to_row(
         root, head, path, "  ", max_size, deadline, tick, budget
@@ -395,10 +416,9 @@ def _read_final_head_file(
     matched = _match_tree_entry(tree_out, path)
     if matched is None:
         return None
-    mode, kind = matched
-    if kind == "tree":
+    if matched.kind == "tree":
         return None
-    if kind != "blob" or mode not in _REGULAR_BLOB_MODES:
+    if matched.kind != "blob" or matched.mode not in _REGULAR_BLOB_MODES:
         raise FinalizationError("FINAL_SNAPSHOT_UNSTABLE")
     return _stream_git_blob_to_row(
         root,
@@ -415,7 +435,7 @@ def _read_final_head_file(
 def _match_tree_entry(
     tree_out: bytes,
     path: str,
-) -> tuple[str, str] | None:
+) -> _TreeEntry | None:
     target = path.encode("utf-8")
     for record in tree_out.split(b"\0"):
         if not record:
@@ -433,7 +453,7 @@ def _match_tree_entry(
             kind = parts[1].decode("ascii")
         except UnicodeDecodeError:
             raise FinalizationError("BASELINE_OBJECT_UNAVAILABLE") from None
-        return mode, kind
+        return _TreeEntry(mode=mode, kind=kind)
     return None
 
 
@@ -456,7 +476,7 @@ def _read_final_file(
             return None
         if not target.is_file() or target.is_symlink():
             raise OSError
-        digest, size, binary, saved = _hash_worktree_file(
+        hashed = _hash_worktree_file(
             target,
             max_size,
             deadline,
@@ -479,10 +499,10 @@ def _read_final_file(
     return BaselineFileRow(
         path=path,
         status=status or "  ",
-        sha256=digest,
-        size=size,
-        is_binary=binary,
-        content=saved,
+        sha256=hashed.sha256,
+        size=hashed.size,
+        is_binary=hashed.is_binary,
+        content=(bytes(hashed.data) if hashed.data is not None else None),
     )
 
 
@@ -494,7 +514,7 @@ def _hash_worktree_file(
     open_fn: Callable[..., Any],
     budget: HashBudget,
     file_started_at: float,
-) -> tuple[str, int, int, bytes | None]:
+) -> HashedContent:
     return hash_worktree_file(
         target,
         max_size,
@@ -556,7 +576,7 @@ def _stream_git_blob_to_row(
         if proc.stdout is None:
             raise FinalizationError("BASELINE_OBJECT_UNAVAILABLE")
         try:
-            digest, size, binary, retained, stream_now = hash_stream(
+            streamed = hash_stream(
                 proc.stdout,
                 max_size,
                 tick=tick,
@@ -580,6 +600,8 @@ def _stream_git_blob_to_row(
             ):
                 raise FinalizationError("FINAL_HASH_TIMEOUT") from error
             raise FinalizationError("BASELINE_OBJECT_UNAVAILABLE") from error
+        hashed = streamed.content
+        stream_now = streamed.finished_at
         elapsed_at_stream = stream_now - file_started_at
         deadline_remaining = deadline - stream_now
         subprocess_remaining = SUBPROCESS_TIMEOUT_SECONDS - elapsed_at_stream
@@ -614,16 +636,16 @@ def _stream_git_blob_to_row(
             raise FinalizationError("BASELINE_OBJECT_UNAVAILABLE")
         budget.commit(wait_now - file_started_at)
         saved = None
-        if not binary and size <= max_size:
-            saved = gzip.compress(bytes(retained))
+        if not hashed.is_binary and hashed.size <= max_size:
+            saved = gzip.compress(bytes(hashed.data))
         if tick() >= deadline:
             raise FinalizationError("FINAL_SNAPSHOT_TIMEOUT")
         return BaselineFileRow(
             path=path,
             status=status,
-            sha256=digest,
-            size=size,
-            is_binary=binary,
+            sha256=hashed.sha256,
+            size=hashed.size,
+            is_binary=hashed.is_binary,
             content=saved,
         )
     finally:

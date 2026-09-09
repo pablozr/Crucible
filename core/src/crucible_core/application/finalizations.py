@@ -19,6 +19,11 @@ from crucible_core.repositories import finalizations_repository as final_repo
 from crucible_core.repositories import sessions_repository as sessions_repo
 from crucible_core.repositories import tasks_repository as tasks_repo
 from crucible_core.schemas.admissions import EventRequest
+from crucible_core.schemas.finalizations import (
+    BeginFinalizationResult,
+    BeginReplayed,
+    FinalCaptureSnapshot,
+)
 from crucible_core.schemas.persistence import (
     BaselineFileRow,
     FinalizationEventRow,
@@ -116,7 +121,7 @@ class FinalizationCoordinator:
         self,
         database_path: Path,
         *,
-        capture_final: Callable[..., dict[str, Any]],
+        capture_final: Callable[..., FinalCaptureSnapshot],
         publication_hook: Callable[[], None] | None = None,
         clock: Callable[[], datetime] | None = None,
         max_authorization_window_seconds: int | None = None,
@@ -186,9 +191,13 @@ class FinalizationCoordinator:
                             return self._reconcile(
                                 event_id, payload_hash, existing
                             )
-                    if isinstance(begun, dict):
-                        return begun
-                    generation, task, input_row_id = begun
+                    if isinstance(begun, BeginReplayed):
+                        return begun.response
+                    generation, task, input_row_id = (
+                        begun.generation,
+                        begun.task,
+                        begun.input_row_id,
+                    )
                     _pre_generation = int(generation)
                     try:
                         project = resolve_project(event.git_root)
@@ -262,9 +271,13 @@ class FinalizationCoordinator:
                     if existing is None:
                         raise
                     return self._reconcile(event_id, payload_hash, existing)
-            if isinstance(begun, dict):
-                return begun
-            generation, task, input_row_id = begun
+            if isinstance(begun, BeginReplayed):
+                return begun.response
+            generation, task, input_row_id = (
+                begun.generation,
+                begun.task,
+                begun.input_row_id,
+            )
             # resolve_project performs Git reads, so it must only run after
             # _begin's transaction has rechecked the capture window and
             # consumed the authorization; a project failure here fails the
@@ -444,7 +457,7 @@ class FinalizationCoordinator:
         task_id: str,
         payload_hash: str,
         not_after: datetime,
-    ) -> tuple[int, FinalizationTask, str] | dict[str, object]:
+    ) -> BeginFinalizationResult | BeginReplayed:
         with connect(self._database_path) as connection:
             connection.execute("BEGIN IMMEDIATE")
             duplicate = final_repo.get_finalization_event(
@@ -452,8 +465,10 @@ class FinalizationCoordinator:
             )
             if duplicate is not None:
                 connection.rollback()
-                return self._reconcile(
-                    str(event.event_id), payload_hash, duplicate
+                return BeginReplayed(
+                    response=self._reconcile(
+                        str(event.event_id), payload_hash, duplicate
+                    )
                 )
             task = tasks_repo.get_finalization_task(connection, task_id)
             if task is None:
@@ -468,8 +483,10 @@ class FinalizationCoordinator:
                 raise FinalizationError("INPUT_TASK_MISMATCH", 409)
 
             if self._clock() > not_after:
-                return self._reject_expired_locked(
-                    connection, event, task_id, payload_hash, stored.id
+                return BeginReplayed(
+                    response=self._reject_expired_locked(
+                        connection, event, task_id, payload_hash, stored.id
+                    )
                 )
 
             generation = final_repo.begin_finalization(
@@ -499,7 +516,9 @@ class FinalizationCoordinator:
                 ),
             )
             connection.commit()
-            return generation, task, stored.id
+            return BeginFinalizationResult(
+                generation=generation, task=task, input_row_id=stored.id
+            )
 
     def _abort_expired(
         self,
@@ -586,7 +605,7 @@ class FinalizationCoordinator:
         task_id: str,
         tree_id: str,
         generation: int,
-        snapshot: dict[str, Any],
+        snapshot: FinalCaptureSnapshot,
         deadline: float,
     ) -> None:
         with connect(self._database_path) as connection:
@@ -618,12 +637,12 @@ class FinalizationCoordinator:
             if self._monotonic() >= deadline:
                 connection.rollback()
                 raise FinalizationError("FINAL_SNAPSHOT_TIMEOUT")
-            for row in snapshot["baseline_files"]:
+            for row in snapshot.baseline_files:
                 final_repo.insert_baseline_file(connection, task_id, row)
             if self._monotonic() >= deadline:
                 connection.rollback()
                 raise FinalizationError("FINAL_SNAPSHOT_TIMEOUT")
-            for row in snapshot["changes"]:
+            for row in snapshot.changes:
                 final_repo.insert_file_change(connection, task_id, row)
             if self._monotonic() >= deadline:
                 connection.rollback()
@@ -639,15 +658,15 @@ class FinalizationCoordinator:
                 "WHERE id = ? AND status = 'finalizing' "
                 "AND capture_generation = ? AND snapshot_frozen_at IS NULL",
                 (
-                    snapshot["head"],
-                    snapshot["branch"],
-                    snapshot["status"],
-                    snapshot["index"],
+                    snapshot.head,
+                    snapshot.branch,
+                    snapshot.status,
+                    snapshot.index,
                     frozen_at,
                     "complete"
                     if all(
                         row.evidence_status == "complete"
-                        for row in snapshot["changes"]
+                        for row in snapshot.changes
                     )
                     else "partial",
                     task_id,

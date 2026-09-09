@@ -5,20 +5,22 @@ import binascii
 import hashlib
 import json
 
+from crucible_core.schemas.git import IndexEntry
+
 INDEX_MANIFEST_VERSION = 1
 
 _ALLOWED_MODES = frozenset({"100644", "100755", "120000", "160000"})
 
 
-def parse_ls_files(raw: bytes) -> list[tuple[bytes, str, str]]:
-    """Parse `git ls-files -s -z` bytes into (path, oid, mode) triples.
+def parse_ls_files(raw: bytes) -> list[IndexEntry]:
+    """Parse `git ls-files -s -z` bytes into ordered index entries.
 
     Paths are kept as raw bytes so non-UTF-8 Git paths round-trip
     losslessly via base64. Only fully-merged (stage 0) entries are
     accepted; anything else fails closed for the caller to map to a
     safe capture error.
     """
-    entries: list[tuple[bytes, str, str]] = []
+    entries: list[IndexEntry] = []
     if not raw:
         return entries
     for record in raw.split(b"\0"):
@@ -43,27 +45,27 @@ def parse_ls_files(raw: bytes) -> list[tuple[bytes, str, str]]:
             raise ValueError("malformed index oid")
         if stage != "0":
             raise ValueError("unmerged index stage")
-        entries.append((path, oid, mode))
+        entries.append(IndexEntry(path=path, oid=oid, mode=mode))
     return entries
 
 
 def serialize_manifest(
-    entries: list[tuple[bytes, str, str]],
+    entries: list[IndexEntry],
 ) -> bytes:
     """Serialize entries to canonical versioned JSON bytes.
 
     Semantically an ordered collection of {path_b64, oid, mode};
     ordering is deterministic by raw path bytes.
     """
-    ordered = sorted(entries, key=lambda item: item[0])
+    ordered = sorted(entries, key=lambda item: item.path)
     payload = {
         "entries": [
             {
-                "mode": mode,
-                "oid": oid,
-                "path_b64": base64.b64encode(path).decode("ascii"),
+                "mode": entry.mode,
+                "oid": entry.oid,
+                "path_b64": base64.b64encode(entry.path).decode("ascii"),
             }
-            for path, oid, mode in ordered
+            for entry in ordered
         ],
         "version": INDEX_MANIFEST_VERSION,
     }
@@ -83,7 +85,7 @@ def manifest_sha256(canonical: bytes) -> str:
 
 def parse_canonical_manifest(
     data: bytes,
-) -> list[tuple[bytes, str, str]]:
+) -> list[IndexEntry]:
     """Parse and validate canonical manifest bytes."""
     try:
         payload = json.loads(data.decode("utf-8"))
@@ -97,7 +99,7 @@ def parse_canonical_manifest(
     raw_entries = payload.get("entries")
     if not isinstance(raw_entries, list):
         raise ValueError("malformed index manifest entries")
-    entries: list[tuple[bytes, str, str]] = []
+    entries: list[IndexEntry] = []
     for item in raw_entries:
         if not isinstance(item, dict):
             raise ValueError("malformed index manifest entry")
@@ -120,9 +122,9 @@ def parse_canonical_manifest(
             path = base64.b64decode(path_b64.encode("ascii"), validate=True)
         except (UnicodeEncodeError, binascii.Error):
             raise ValueError("malformed index path") from None
-        entries.append((path, oid, mode))
-    if [path for path, _, _ in entries] != sorted(
-        [path for path, _, _ in entries]
+        entries.append(IndexEntry(path=path, oid=oid, mode=mode))
+    if [entry.path for entry in entries] != sorted(
+        [entry.path for entry in entries]
     ):
         raise ValueError("non-deterministic index order")
     return entries

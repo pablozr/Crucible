@@ -19,68 +19,70 @@ from crucible_core.schemas.persistence import (
 def find_event(
     connection: sqlite3.Connection, event_id: str
 ) -> InboundEvent | None:
+    connection.row_factory = sqlite3.Row
     row = connection.execute(
-        "SELECT payload_hash, status, outcome, input_id, task_id, "
-        "failure_code "
+        "SELECT payload_hash AS payload_hash, status AS status, "
+        "outcome AS outcome, input_id AS input_id, task_id AS task_id, "
+        "failure_code AS failure_code "
         "FROM inbound_events WHERE id = ?",
         (event_id,),
     ).fetchone()
     if row is None:
         return None
 
-    payload_hash, status, outcome, input_id, task_id, failure_code = row
-
     return InboundEvent(
-        payload_hash=payload_hash,
-        status=status,
-        outcome=outcome,
-        input_id=input_id,
-        task_id=task_id,
-        failure_code=failure_code,
+        payload_hash=row["payload_hash"],
+        status=row["status"],
+        outcome=row["outcome"],
+        input_id=row["input_id"],
+        task_id=row["task_id"],
+        failure_code=row["failure_code"],
     )
 
 
 def find_event_detail(
     connection: sqlite3.Connection, event_id: str
 ) -> InboundEventDetail | None:
+    connection.row_factory = sqlite3.Row
     row = connection.execute(
-        "SELECT status, outcome, input_id, task_id, payload_hash, "
-        "failure_code "
+        "SELECT status AS status, outcome AS outcome, input_id AS input_id, "
+        "task_id AS task_id, payload_hash AS payload_hash, "
+        "failure_code AS failure_code "
         "FROM inbound_events WHERE id = ?",
         (event_id,),
     ).fetchone()
     if row is None:
         return None
 
-    status, outcome, input_id, task_id, payload_hash, failure_code = row
-
     return InboundEventDetail(
-        status=status,
-        outcome=outcome,
-        input_id=input_id,
-        task_id=task_id,
-        payload_hash=payload_hash,
-        failure_code=failure_code,
+        status=row["status"],
+        outcome=row["outcome"],
+        input_id=row["input_id"],
+        task_id=row["task_id"],
+        payload_hash=row["payload_hash"],
+        failure_code=row["failure_code"],
     )
 
 
 def list_events(
     connection: sqlite3.Connection, limit: int
 ) -> list[EventSummary]:
+    connection.row_factory = sqlite3.Row
     rows = connection.execute(
-        "SELECT id, status, outcome, failure_code FROM inbound_events "
+        "SELECT id AS event_id, status AS status, outcome AS outcome, "
+        "failure_code AS failure_code FROM inbound_events "
         "ORDER BY received_at DESC, id DESC LIMIT ?",
         (limit,),
     ).fetchall()
 
     return [
         EventSummary(
-            event_id=event_id,
-            status=status,
-            outcome=outcome,
-            failure_code=failure_code,
+            event_id=row["event_id"],
+            status=row["status"],
+            outcome=row["outcome"],
+            failure_code=row["failure_code"],
         )
-        for event_id, status, outcome, failure_code in rows
+        for row in rows
     ]
 
 
@@ -223,48 +225,50 @@ def insert_candidate(
 def find_captured_candidate(
     connection: sqlite3.Connection, candidate_id: str
 ) -> CapturedCandidate | None:
+    connection.row_factory = sqlite3.Row
     row = connection.execute(
-        "SELECT baseline_head, baseline_status, baseline_branch, "
-        "baseline_index_manifest FROM admission_candidates WHERE id = ? "
+        "SELECT baseline_head AS baseline_head, "
+        "baseline_status AS baseline_status, "
+        "baseline_branch AS baseline_branch, "
+        "baseline_index_manifest AS baseline_index_manifest "
+        "FROM admission_candidates WHERE id = ? "
         "AND status = 'captured'",
         (candidate_id,),
     ).fetchone()
     if row is None:
         return None
 
-    head, status, branch, index_manifest = row
-
     return CapturedCandidate(
-        baseline_head=head,
-        baseline_status=status,
-        baseline_branch=branch,
-        baseline_index_manifest=index_manifest,
+        baseline_head=row["baseline_head"],
+        baseline_status=row["baseline_status"],
+        baseline_branch=row["baseline_branch"],
+        baseline_index_manifest=row["baseline_index_manifest"],
     )
 
 
 def list_candidate_ids_by_event(
     connection: sqlite3.Connection, event_id: str
 ) -> list[CandidateRef]:
+    connection.row_factory = sqlite3.Row
     rows = connection.execute(
-        "SELECT id FROM admission_candidates WHERE event_id = ?",
+        "SELECT id AS candidate_id FROM admission_candidates "
+        "WHERE event_id = ?",
         (event_id,),
     ).fetchall()
 
-    return [
-        CandidateRef(candidate_id=candidate_id) for (candidate_id,) in rows
-    ]
+    return [CandidateRef(candidate_id=row["candidate_id"]) for row in rows]
 
 
 def list_captured_candidate_ids(
     connection: sqlite3.Connection,
 ) -> list[CandidateRef]:
+    connection.row_factory = sqlite3.Row
     rows = connection.execute(
-        "SELECT id FROM admission_candidates WHERE status = 'captured'"
+        "SELECT id AS candidate_id FROM admission_candidates "
+        "WHERE status = 'captured'"
     ).fetchall()
 
-    return [
-        CandidateRef(candidate_id=candidate_id) for (candidate_id,) in rows
-    ]
+    return [CandidateRef(candidate_id=row["candidate_id"]) for row in rows]
 
 
 def mark_candidate_promoted(
@@ -326,22 +330,24 @@ def insert_candidate_file(
 def list_candidate_files(
     connection: sqlite3.Connection, candidate_id: str
 ) -> list[BaselineFileRow]:
+    connection.row_factory = sqlite3.Row
     rows = connection.execute(
-        "SELECT path, status, sha256, size, is_binary, content "
+        "SELECT path AS path, status AS status, sha256 AS sha256, "
+        "size AS size, is_binary AS is_binary, content AS content "
         "FROM candidate_baseline_files WHERE candidate_id = ?",
         (candidate_id,),
     ).fetchall()
 
     return [
         BaselineFileRow(
-            path=path,
-            status=status,
-            sha256=sha256,
-            size=size,
-            is_binary=is_binary,
-            content=content,
+            path=row["path"],
+            status=row["status"],
+            sha256=row["sha256"],
+            size=row["size"],
+            is_binary=row["is_binary"],
+            content=row["content"],
         )
-        for path, status, sha256, size, is_binary, content in rows
+        for row in rows
     ]
 
 
@@ -360,20 +366,21 @@ def find_no_input_decision(
     agent_session_id: str,
     native_input_id: str,
 ) -> NoInputDecisionRow | None:
+    connection.row_factory = sqlite3.Row
     row = connection.execute(
-        "SELECT admission_hash, outcome, event_id, reference_task_id "
+        "SELECT admission_hash AS admission_hash, outcome AS outcome, "
+        "event_id AS event_id, reference_task_id AS reference_task_id "
         "FROM admission_no_input_decisions WHERE adapter = ? "
         "AND agent_session_id = ? AND native_input_id = ?",
         (adapter, agent_session_id, native_input_id),
     ).fetchone()
     if row is None:
         return None
-    admission_hash, outcome, event_id, reference_task_id = row
     return NoInputDecisionRow(
-        admission_hash=admission_hash,
-        outcome=outcome,
-        event_id=event_id,
-        reference_task_id=reference_task_id,
+        admission_hash=row["admission_hash"],
+        outcome=row["outcome"],
+        event_id=row["event_id"],
+        reference_task_id=row["reference_task_id"],
     )
 
 

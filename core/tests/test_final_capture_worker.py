@@ -117,12 +117,12 @@ def test_spawn_real_returns_snapshot_with_bytes(tmp_path):
         "task-1",
     )
     snapshot = worker.wait_capture(key, deadline)
-    assert snapshot["head"] == head
-    assert snapshot["branch"] == branch
-    assert isinstance(snapshot["status"], bytes)
-    assert isinstance(snapshot["index"], bytes)
-    assert snapshot["baseline_files"] == []
-    assert snapshot["changes"] == []
+    assert snapshot.head == head
+    assert snapshot.branch == branch
+    assert isinstance(snapshot.status, bytes)
+    assert isinstance(snapshot.index, bytes)
+    assert snapshot.baseline_files == []
+    assert snapshot.changes == []
     assert worker._REGISTRY == {}
 
 

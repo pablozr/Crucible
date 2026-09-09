@@ -21,30 +21,32 @@ from crucible_core.infrastructure.git.index_manifest import (
     sha256_for_stored,
 )
 from crucible_core.main import app
+from crucible_core.schemas.git import IndexEntry
 
 OID_A = "a" * 40
 OID_B = "b" * 40
 
 
-def _raw(entries: list[tuple[bytes, str, str]]) -> bytes:
+def _raw(entries: list[IndexEntry]) -> bytes:
     out = b""
-    for path, oid, mode in entries:
-        out += f"{mode} {oid} 0\t".encode("ascii") + path + b"\0"
+    for entry in entries:
+        header = f"{entry.mode} {entry.oid} 0\t".encode("ascii")
+        out += header + entry.path + b"\0"
     return out
 
 
 def test_parse_basic_and_roundtrip() -> None:
-    raw = _raw([(b"a.txt", OID_A, "100644")])
+    raw = _raw([IndexEntry(path=b"a.txt", oid=OID_A, mode="100644")])
     entries = parse_ls_files(raw)
-    assert entries == [(b"a.txt", OID_A, "100644")]
+    assert entries == [IndexEntry(path=b"a.txt", oid=OID_A, mode="100644")]
     canonical = build_canonical_manifest(raw)
     assert parse_canonical_manifest(canonical) == entries
 
 
 def test_non_utf8_path_is_lossless() -> None:
-    raw = _raw([(b"\xff\xfe_name", OID_A, "100644")])
+    raw = _raw([IndexEntry(path=b"\xff\xfe_name", oid=OID_A, mode="100644")])
     entries = parse_ls_files(raw)
-    assert entries[0][0] == b"\xff\xfe_name"
+    assert entries[0].path == b"\xff\xfe_name"
     canonical = build_canonical_manifest(raw)
     payload = json.loads(canonical.decode("utf-8"))
     assert payload["version"] == INDEX_MANIFEST_VERSION
@@ -55,13 +57,25 @@ def test_non_utf8_path_is_lossless() -> None:
 
 
 def test_determinism_and_hash() -> None:
-    first = _raw([(b"b.txt", OID_B, "100644"), (b"a.txt", OID_A, "100755")])
-    second = _raw([(b"a.txt", OID_A, "100755"), (b"b.txt", OID_B, "100644")])
+    first = _raw(
+        [
+            IndexEntry(path=b"b.txt", oid=OID_B, mode="100644"),
+            IndexEntry(path=b"a.txt", oid=OID_A, mode="100755"),
+        ]
+    )
+    second = _raw(
+        [
+            IndexEntry(path=b"a.txt", oid=OID_A, mode="100755"),
+            IndexEntry(path=b"b.txt", oid=OID_B, mode="100644"),
+        ]
+    )
     assert build_canonical_manifest(first) == build_canonical_manifest(second)
     canonical = build_canonical_manifest(first)
     assert manifest_sha256(canonical) == hashlib.sha256(canonical).hexdigest()
     assert len(manifest_sha256(canonical)) == 64
-    other = build_canonical_manifest(_raw([(b"a.txt", OID_B, "100644")]))
+    other = build_canonical_manifest(
+        _raw([IndexEntry(path=b"a.txt", oid=OID_B, mode="100644")])
+    )
     assert manifest_sha256(other) != manifest_sha256(canonical)
     payload = json.loads(canonical.decode("utf-8"))
     assert [item["path_b64"] for item in payload["entries"]] == sorted(
@@ -111,7 +125,7 @@ def test_rejects_malformed_manifests() -> None:
 
 
 def test_legacy_raw_normalizes_to_canonical() -> None:
-    raw = _raw([(b"a.txt", OID_A, "100644")])
+    raw = _raw([IndexEntry(path=b"a.txt", oid=OID_A, mode="100644")])
     assert normalize_stored_manifest(raw) == build_canonical_manifest(raw)
     canonical = build_canonical_manifest(raw)
     assert normalize_stored_manifest(canonical) == canonical
@@ -252,7 +266,12 @@ def test_task_detail_normalizes_legacy_raw_manifest(
     )
     root = tmp_path / "repo"
     project_id = _git_repo(root)
-    raw = _raw([(b"b.txt", OID_B, "100644"), (b"a.txt", OID_A, "100755")])
+    raw = _raw(
+        [
+            IndexEntry(path=b"b.txt", oid=OID_B, mode="100644"),
+            IndexEntry(path=b"a.txt", oid=OID_A, mode="100755"),
+        ]
+    )
     expected_canonical = build_canonical_manifest(raw)
     expected_sha = hashlib.sha256(expected_canonical).hexdigest()
     with TestClient(app) as client:

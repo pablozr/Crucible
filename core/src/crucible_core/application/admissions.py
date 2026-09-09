@@ -21,6 +21,7 @@ from crucible_core.responses.admissions import (
     reconciled_event_response,
 )
 from crucible_core.schemas.admissions import EventRequest
+from crucible_core.schemas.git import BaselineCaptureSnapshot
 from crucible_core.schemas.persistence import (
     BaselineFileRow,
     InboundEvent,
@@ -52,7 +53,9 @@ class AdmissionCoordinator:
         self,
         database_path: Path,
         *,
-        capture_baseline: Callable[[Path, int, float], dict[str, Any]],
+        capture_baseline: Callable[
+            [Path, int, float], BaselineCaptureSnapshot
+        ],
         race_hook: Any | None = None,
     ) -> None:
         self._database_path = database_path
@@ -260,7 +263,7 @@ class AdmissionCoordinator:
         event_id: str,
         payload_hash: str,
         candidate_id: str,
-        baseline: dict[str, Any],
+        baseline: BaselineCaptureSnapshot,
         now: str,
         deadline: float,
         git_root: str,
@@ -339,17 +342,17 @@ class AdmissionCoordinator:
                     candidate_id=candidate_id,
                     session_id=session_id,
                     native_input_id=event.input_id,
-                    baseline_head=baseline["head"],
-                    baseline_status=baseline["status"],
-                    baseline_branch=baseline["branch"],
-                    baseline_index_manifest=baseline["index"],
+                    baseline_head=baseline.head,
+                    baseline_status=baseline.status,
+                    baseline_branch=baseline.branch,
+                    baseline_index_manifest=baseline.index,
                     created_at=now,
                     admission_hash=self._admission_hash(event),
                     event_id=event_id,
                 ),
             )
             self._persist_candidate_files(
-                connection, candidate_id, baseline["files"]
+                connection, candidate_id, baseline.files
             )
             connection.commit()
         return self._promote_candidate(

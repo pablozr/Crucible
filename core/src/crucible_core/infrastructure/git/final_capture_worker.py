@@ -71,7 +71,7 @@ def final_capture_worker_main(
             capture_final,
         )
 
-        snapshot_dict = capture_final(
+        snapshot = capture_final(
             Path(request.git_root),
             request.baseline_head,
             request.baseline_branch,
@@ -79,14 +79,6 @@ def final_capture_worker_main(
             list(request.baseline_files),
             request.max_file_size_bytes,
             request.deadline_monotonic,
-        )
-        snapshot = FinalCaptureSnapshot(
-            head=str(snapshot_dict["head"]),
-            branch=str(snapshot_dict["branch"]),
-            status=bytes(snapshot_dict["status"]),
-            index=bytes(snapshot_dict["index"]),
-            baseline_files=list(snapshot_dict.get("baseline_files") or []),
-            changes=list(snapshot_dict.get("changes") or []),
         )
         envelope = FinalCaptureEnvelope(ok=True, snapshot=snapshot)
         try:
@@ -214,7 +206,7 @@ def wait_capture(
     key: CaptureKey,
     deadline: float,
     monotonic: Callable[[], float] | None = None,
-) -> dict[str, Any]:
+) -> FinalCaptureSnapshot:
     """Wait for snapshot within deadline (spawn+capture+IPC included).
 
     Parent-observed deadline expiry raises the internal
@@ -266,7 +258,7 @@ def wait_capture(
             )
         if tick() >= deadline:
             raise FinalizationError(WAIT_TIMEOUT_CODE)
-        return envelope.snapshot.to_dict()
+        return envelope.snapshot
     finally:
         with BOUNDARY_LOCK:
             _REGISTRY.pop(key, None)

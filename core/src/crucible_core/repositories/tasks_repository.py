@@ -21,34 +21,37 @@ from crucible_core.schemas.persistence import (
 def find_active_task_by_session(
     connection: sqlite3.Connection, session_id: str
 ) -> str | None:
+    connection.row_factory = sqlite3.Row
     row = connection.execute(
-        "SELECT id FROM tasks WHERE session_id = ? "
+        "SELECT id AS id FROM tasks WHERE session_id = ? "
         "AND status IN ('running', 'finalizing') "
         "ORDER BY started_at DESC, id DESC LIMIT 1",
         (session_id,),
     ).fetchone()
-    return row[0] if row else None
+    return str(row["id"]) if row else None
 
 
 def find_running_task_by_session(
     connection: sqlite3.Connection, session_id: str
 ) -> str | None:
+    connection.row_factory = sqlite3.Row
     row = connection.execute(
-        "SELECT id FROM tasks WHERE session_id = ? "
+        "SELECT id AS id FROM tasks WHERE session_id = ? "
         "AND status = 'running' "
         "ORDER BY started_at DESC, id DESC LIMIT 1",
         (session_id,),
     ).fetchone()
-    return row[0] if row else None
+    return str(row["id"]) if row else None
 
 
 def get_task_status(
     connection: sqlite3.Connection, task_id: str
 ) -> str | None:
+    connection.row_factory = sqlite3.Row
     row = connection.execute(
-        "SELECT status FROM tasks WHERE id = ?", (task_id,)
+        "SELECT status AS status FROM tasks WHERE id = ?", (task_id,)
     ).fetchone()
-    return row[0] if row else None
+    return str(row["status"]) if row else None
 
 
 def get_task_owner(
@@ -77,32 +80,35 @@ def get_task_owner(
 def find_active_task_by_tree(
     connection: sqlite3.Connection, tree_id: str
 ) -> ActiveTaskRef | None:
+    connection.row_factory = sqlite3.Row
     row = connection.execute(
-        "SELECT id, session_id FROM tasks WHERE working_tree_id = ? "
+        "SELECT id AS id, session_id AS session_id FROM tasks "
+        "WHERE working_tree_id = ? "
         "AND status IN ('running', 'finalizing') LIMIT 1",
         (tree_id,),
     ).fetchone()
     if row is None:
         return None
-    task_id, task_session_id = row
-    return ActiveTaskRef(id=task_id, session_id=task_session_id)
+    return ActiveTaskRef(id=str(row["id"]), session_id=str(row["session_id"]))
 
 
 def find_input(
     connection: sqlite3.Connection, session_id: str, input_id: str
 ) -> StoredInput | None:
+    connection.row_factory = sqlite3.Row
     row = connection.execute(
-        "SELECT id, task_id, admission_hash FROM inputs "
+        "SELECT id AS id, task_id AS task_id, "
+        "admission_hash AS admission_hash FROM inputs "
         "WHERE session_id = ? AND input_id = ?",
         (session_id, input_id),
     ).fetchone()
     if row is None:
         return None
 
-    row_id, task_id, admission_hash = row
-
     return StoredInput(
-        id=row_id, task_id=task_id, admission_hash=admission_hash
+        id=row["id"],
+        task_id=row["task_id"],
+        admission_hash=row["admission_hash"],
     )
 
 
@@ -112,8 +118,10 @@ def find_input_by_adapter_session(
     agent_session_id: str,
     input_id: str,
 ) -> StoredInput | None:
+    connection.row_factory = sqlite3.Row
     row = connection.execute(
-        "SELECT inputs.id, inputs.task_id, inputs.admission_hash "
+        "SELECT inputs.id AS id, inputs.task_id AS task_id, "
+        "inputs.admission_hash AS admission_hash "
         "FROM inputs "
         "JOIN sessions ON sessions.id = inputs.session_id "
         "WHERE sessions.adapter = ? AND sessions.agent_session_id = ? "
@@ -123,10 +131,10 @@ def find_input_by_adapter_session(
     if row is None:
         return None
 
-    row_id, task_id, admission_hash = row
-
     return StoredInput(
-        id=row_id, task_id=task_id, admission_hash=admission_hash
+        id=row["id"],
+        task_id=row["task_id"],
+        admission_hash=row["admission_hash"],
     )
 
 
@@ -181,11 +189,15 @@ def list_tasks_page(
         clause = "WHERE (tasks.started_at, tasks.id) < (?, ?)"
         values.extend([started_at, task_id])
     values.append(limit + 1)
+    connection.row_factory = sqlite3.Row
     rows = connection.execute(
-        "SELECT tasks.id, tasks.status, tasks.started_at, "
-        "working_trees.git_root, "
-        "projects.id, tasks.baseline_branch, tasks.failure_code, "
-        "tasks.failure_message FROM tasks JOIN working_trees ON "
+        "SELECT tasks.id AS id, tasks.status AS status, "
+        "tasks.started_at AS started_at, "
+        "working_trees.git_root AS worktree, "
+        "projects.id AS project_id, tasks.baseline_branch AS branch, "
+        "tasks.failure_code AS failure_code, "
+        "tasks.failure_message AS failure_message FROM tasks "
+        "JOIN working_trees ON "
         "working_trees.id = tasks.working_tree_id JOIN projects ON "
         "projects.id = "
         f"working_trees.project_id {clause} "
@@ -196,25 +208,16 @@ def list_tasks_page(
 
     return [
         TaskPageRow(
-            id=row_id,
-            status=status,
-            started_at=row_started_at,
-            worktree=worktree,
-            project_id=project_id,
-            branch=branch,
-            failure_code=failure_code,
-            failure_message=failure_message,
+            id=row["id"],
+            status=row["status"],
+            started_at=row["started_at"],
+            worktree=row["worktree"],
+            project_id=row["project_id"],
+            branch=row["branch"],
+            failure_code=row["failure_code"],
+            failure_message=row["failure_message"],
         )
-        for (
-            row_id,
-            status,
-            row_started_at,
-            worktree,
-            project_id,
-            branch,
-            failure_code,
-            failure_message,
-        ) in rows
+        for row in rows
     ]
 
 
@@ -223,16 +226,18 @@ def list_inputs_by_task_ids(
 ) -> list[TaskInputLink]:
     if not task_ids:
         return []
+    connection.row_factory = sqlite3.Row
     rows = connection.execute(
-        "SELECT task_id, input_id FROM inputs WHERE task_id IN ("
+        "SELECT task_id AS task_id, input_id AS input_id FROM inputs "
+        "WHERE task_id IN ("
         + ",".join("?" for _ in task_ids)
         + ") ORDER BY id",
         task_ids,
     ).fetchall()
 
     return [
-        TaskInputLink(task_id=task_id, input_id=input_id)
-        for task_id, input_id in rows
+        TaskInputLink(task_id=row["task_id"], input_id=row["input_id"])
+        for row in rows
     ]
 
 
@@ -304,12 +309,14 @@ def get_task_row(
 def list_input_ids_by_task(
     connection: sqlite3.Connection, task_id: str
 ) -> list[InputRef]:
+    connection.row_factory = sqlite3.Row
     rows = connection.execute(
-        "SELECT input_id FROM inputs WHERE task_id = ? ORDER BY id",
+        "SELECT input_id AS input_id FROM inputs "
+        "WHERE task_id = ? ORDER BY id",
         (task_id,),
     ).fetchall()
 
-    return [InputRef(input_id=input_id) for (input_id,) in rows]
+    return [InputRef(input_id=row["input_id"]) for row in rows]
 
 
 def insert_task_baseline_file(
@@ -339,22 +346,24 @@ def insert_task_baseline_file(
 def list_task_baseline_files(
     connection: sqlite3.Connection, task_id: str
 ) -> list[BaselineFileRow]:
+    connection.row_factory = sqlite3.Row
     rows = connection.execute(
-        "SELECT path, status, sha256, size, is_binary, content "
+        "SELECT path AS path, status AS status, sha256 AS sha256, "
+        "size AS size, is_binary AS is_binary, content AS content "
         "FROM task_baseline_files WHERE task_id = ? ORDER BY path",
         (task_id,),
     ).fetchall()
 
     return [
         BaselineFileRow(
-            path=path,
-            status=status,
-            sha256=sha256,
-            size=size,
-            is_binary=is_binary,
-            content=content,
+            path=row["path"],
+            status=row["status"],
+            sha256=row["sha256"],
+            size=row["size"],
+            is_binary=row["is_binary"],
+            content=row["content"],
         )
-        for path, status, sha256, size, is_binary, content in rows
+        for row in rows
     ]
 
 

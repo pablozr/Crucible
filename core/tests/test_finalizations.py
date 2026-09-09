@@ -18,6 +18,7 @@ from crucible_core.core.errors import FinalizationError
 from crucible_core.infrastructure.git import final_capture_worker as worker
 from crucible_core.infrastructure.git.final_capture import capture_final
 from crucible_core.main import app
+from crucible_core.schemas.finalizations import FinalCaptureSnapshot
 
 TERMINAL_WINDOW_ENV = "CRUCIBLE_TERMINAL_MAX_AUTH_WINDOW_SECONDS"
 TEST_WINDOW_SECONDS = "3000000000"
@@ -1580,14 +1581,14 @@ def test_fenced_worker_late_snapshot_never_publishes(monkeypatch, tmp_path):
             # Late worker ignores cancel and still returns a snapshot;
             # publication_is_current/fence must refuse to publish it.
             assert state["spawned"][key]["cancelled"] is True
-            return {
-                "head": baseline_head,
-                "branch": baseline_branch,
-                "status": b"",
-                "index": b"",
-                "baseline_files": [],
-                "changes": [],
-            }
+            return FinalCaptureSnapshot(
+                head=baseline_head,
+                branch=baseline_branch,
+                status=b"",
+                index=b"",
+                baseline_files=[],
+                changes=[],
+            )
 
         monkeypatch.setattr(worker, "spawn_capture", _fake_spawn)
         monkeypatch.setattr(worker, "wait_capture", _fake_wait)

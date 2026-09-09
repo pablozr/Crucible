@@ -8,6 +8,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from crucible_core.schemas.git import HashedContent, StreamedContent
+
 # Chunked content hashing shared by baseline and final capture.
 
 CHUNK_SIZE_BYTES = 65536
@@ -61,7 +63,7 @@ def hash_worktree_file(
     deadline: float,
     deadline_error: Callable[[], Exception],
     budget_error: Callable[[], Exception],
-) -> tuple[str, int, int, bytes | None]:
+) -> HashedContent:
     """Stream one worktree file, enforcing deadline and hash budgets.
 
     Reads in fixed-size chunks, updates SHA-256 incrementally, and
@@ -146,7 +148,9 @@ def hash_worktree_file(
         saved = gzip.compress(bytes(retained))
     if tick() >= deadline:
         raise deadline_error()
-    return hasher.hexdigest(), size, int(binary), saved
+    return HashedContent(
+        sha256=hasher.hexdigest(), size=size, is_binary=int(binary), data=saved
+    )
 
 
 def hash_stream(
@@ -160,7 +164,7 @@ def hash_stream(
     deadline_error: Callable[[], Exception],
     budget_error: Callable[[], Exception],
     subprocess_timeout: float | None = None,
-) -> tuple[str, int, int, bytearray, float]:
+) -> StreamedContent:
     """Hash a binary stream in chunks without buffering the whole.
 
     Reads ``stream`` via ``read(CHUNK_SIZE_BYTES)`` until empty,
@@ -245,7 +249,15 @@ def hash_stream(
         deadline_error=deadline_error,
         budget_error=budget_error,
     )
-    return hasher.hexdigest(), size, int(binary), retained, now
+    return StreamedContent(
+        content=HashedContent(
+            sha256=hasher.hexdigest(),
+            size=size,
+            is_binary=int(binary),
+            data=retained,
+        ),
+        finished_at=now,
+    )
 
 
 def _read_chunk(stream: Any, size: int, timeout: float) -> bytes:

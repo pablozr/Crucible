@@ -11,6 +11,7 @@ import pytest
 import crucible_core.infrastructure.git.baseline_capture as baseline_capture
 import crucible_core.infrastructure.git.final_capture as final_capture
 from crucible_core.core.errors import AdmissionError, FinalizationError
+from crucible_core.schemas.finalizations import FinalCaptureSnapshot
 
 MAX_SIZE = 1_048_576
 FAR_DEADLINE = 1_000_000_000.0
@@ -246,7 +247,7 @@ def test_final_retries_unstable_once_then_succeeds(
         time.monotonic() + 60,
     )
     assert calls["count"] == 3
-    assert [change.path for change in snapshot["changes"]] == ["tracked.txt"]
+    assert [change.path for change in snapshot.changes] == ["tracked.txt"]
 
 
 def test_final_second_unstable_raises_without_snapshot(
@@ -291,7 +292,7 @@ def test_clean_tracked_content_is_never_read(tmp_path: Path) -> None:
     )
     assert str(root / "clean.txt") not in probe.opened
     assert str(root / "dirty.txt") in probe.opened
-    assert {row.path for row in baseline["files"]} == {"dirty.txt"}
+    assert {row.path for row in baseline.files} == {"dirty.txt"}
 
     probe.opened.clear()
     snapshot = final_capture.capture_final(
@@ -305,7 +306,7 @@ def test_clean_tracked_content_is_never_read(tmp_path: Path) -> None:
         opener=probe,
     )
     assert str(root / "clean.txt") not in probe.opened
-    assert [change.path for change in snapshot["changes"]] == ["dirty.txt"]
+    assert [change.path for change in snapshot.changes] == ["dirty.txt"]
 
 
 def test_committed_clean_file_needs_no_worktree_read(
@@ -332,7 +333,7 @@ def test_committed_clean_file_needs_no_worktree_read(
         opener=probe,
     )
     assert str(root / "moved.txt") not in probe.opened
-    assert [change.path for change in snapshot["changes"]] == ["moved.txt"]
+    assert [change.path for change in snapshot.changes] == ["moved.txt"]
 
 
 def test_worktree_reads_stream_in_chunks(
@@ -354,7 +355,7 @@ def test_worktree_reads_stream_in_chunks(
     )
     assert probe.data_reads > 1
     assert probe.max_request <= 65536
-    (row,) = [item for item in baseline["files"] if item.path == "big.txt"]
+    (row,) = [item for item in baseline.files if item.path == "big.txt"]
     assert row.sha256 == expected
     assert row.size == len(payload.encode())
     assert row.content is not None
@@ -372,7 +373,7 @@ def test_oversize_file_degrades_to_hash_only(tmp_path: Path) -> None:
         root, 1024, time.monotonic() + 60, opener=probe
     )
     assert probe.data_reads > 1
-    (row,) = [item for item in baseline["files"] if item.path == "big.txt"]
+    (row,) = [item for item in baseline.files if item.path == "big.txt"]
     assert row.sha256 == expected
     assert row.size == len(payload.encode())
     assert row.content is None
@@ -471,7 +472,7 @@ def test_final_blobs_share_aggregate_budget(tmp_path: Path) -> None:
         FAR_DEADLINE,
         clock=StepTick(0.2),
     )
-    assert [change.path for change in snapshot["changes"]] == ["f0.txt"]
+    assert [change.path for change in snapshot.changes] == ["f0.txt"]
 
     pair = tmp_path / "pair"
     head, branch = _make_committed_clean(pair, 2)
@@ -856,14 +857,14 @@ def test_coordinator_freeze_blocked_after_hook_deadline(
 
         def _fake_capture(*args, **kwargs):
             captured["deadline"] = args[6] if len(args) > 6 else 0.0
-            return {
-                "head": "h",
-                "branch": "b",
-                "status": b"",
-                "index": b"manifest",
-                "baseline_files": [],
-                "changes": [],
-            }
+            return FinalCaptureSnapshot(
+                head="h",
+                branch="b",
+                status=b"",
+                index=b"manifest",
+                baseline_files=[],
+                changes=[],
+            )
 
         def _fake_hook() -> None:
             monotonic.now = 200.0
@@ -1059,14 +1060,14 @@ def test_freeze_revalidates_deadline_after_lock_before_write(
             return 100.0 if calls["count"] <= 3 else 200.0
 
         def _fake_capture(*args, **kwargs):
-            return {
-                "head": "h",
-                "branch": "b",
-                "status": b"",
-                "index": b"manifest",
-                "baseline_files": [],
-                "changes": [],
-            }
+            return FinalCaptureSnapshot(
+                head="h",
+                branch="b",
+                status=b"",
+                index=b"manifest",
+                baseline_files=[],
+                changes=[],
+            )
 
         monkeypatch.setattr(
             finalization_service, "_capture_final", _fake_capture
@@ -1134,14 +1135,14 @@ def test_freeze_expiry_inside_transaction_before_persist_rolls_back(
             return original(connection, task_id, tree_id, generation)
 
         def _fake_capture(*args, **kwargs):
-            return {
-                "head": "h",
-                "branch": "b",
-                "status": b"",
-                "index": b"manifest",
-                "baseline_files": [],
-                "changes": [],
-            }
+            return FinalCaptureSnapshot(
+                head="h",
+                branch="b",
+                status=b"",
+                index=b"manifest",
+                baseline_files=[],
+                changes=[],
+            )
 
         monkeypatch.setattr(
             finalization_service, "_capture_final", _fake_capture
@@ -1274,14 +1275,14 @@ def test_freeze_exact_deadline_is_expired(
             return 100.0 if calls["count"] <= 3 else 105.0
 
         def _fake_capture(*args, **kwargs):
-            return {
-                "head": "h",
-                "branch": "b",
-                "status": b"",
-                "index": b"manifest",
-                "baseline_files": [],
-                "changes": [],
-            }
+            return FinalCaptureSnapshot(
+                head="h",
+                branch="b",
+                status=b"",
+                index=b"manifest",
+                baseline_files=[],
+                changes=[],
+            )
 
         monkeypatch.setattr(
             finalization_service, "_capture_final", _fake_capture
@@ -1351,12 +1352,12 @@ def test_freeze_advancing_to_limit_after_inserts_rolls_back(
             return original_insert(connection, task_id_arg, row)
 
         def _fake_capture(*args, **kwargs):
-            return {
-                "head": "h",
-                "branch": "b",
-                "status": b"",
-                "index": b"manifest",
-                "baseline_files": [
+            return FinalCaptureSnapshot(
+                head="h",
+                branch="b",
+                status=b"",
+                index=b"manifest",
+                baseline_files=[
                     BaselineFileRow(
                         path="extra.txt",
                         status="  ",
@@ -1366,7 +1367,7 @@ def test_freeze_advancing_to_limit_after_inserts_rolls_back(
                         content=None,
                     )
                 ],
-                "changes": [
+                changes=[
                     TaskFileChangeRow(
                         path="tracked.txt",
                         operation="modified",
@@ -1379,7 +1380,7 @@ def test_freeze_advancing_to_limit_after_inserts_rolls_back(
                         evidence_reason="SNAPSHOT_SIZE_LIMIT",
                     )
                 ],
-            }
+            )
 
         monkeypatch.setattr(
             finalization_service, "_capture_final", _fake_capture
@@ -1451,14 +1452,14 @@ def test_freeze_update_advancing_to_deadline_rolls_back(
             return 100.0 if calls["count"] <= 9 else 105.0
 
         def _fake_capture(*args, **kwargs):
-            return {
-                "head": "h",
-                "branch": "b",
-                "status": b"",
-                "index": b"manifest",
-                "baseline_files": [],
-                "changes": [],
-            }
+            return FinalCaptureSnapshot(
+                head="h",
+                branch="b",
+                status=b"",
+                index=b"manifest",
+                baseline_files=[],
+                changes=[],
+            )
 
         monkeypatch.setattr(
             finalization_service, "_capture_final", _fake_capture
@@ -1656,14 +1657,14 @@ def test_freeze_lock_waits_within_deadline_budget(
         db_path = tmp_path / "data" / "crucible.db"
 
         def _fake_capture(*args, **kwargs):
-            return {
-                "head": "h",
-                "branch": "b",
-                "status": b"",
-                "index": b"manifest",
-                "baseline_files": [],
-                "changes": [],
-            }
+            return FinalCaptureSnapshot(
+                head="h",
+                branch="b",
+                status=b"",
+                index=b"manifest",
+                baseline_files=[],
+                changes=[],
+            )
 
         monkeypatch.setattr(
             finalization_service, "_capture_final", _fake_capture
@@ -1766,11 +1767,31 @@ def test_freeze_sub_ms_remainder_rounds_busy_timeout_up(
     monkeypatch.setattr(finalizations_app, "connect", _FakeConnect)
     coordinator = finalizations_app.FinalizationCoordinator(
         tmp_path / "crucible.db",
-        capture_final=lambda *a, **k: {},
+        capture_final=lambda *a, **k: FinalCaptureSnapshot(
+            head="h",
+            branch="b",
+            status=b"",
+            index=b"",
+            baseline_files=[],
+            changes=[],
+        ),
         monotonic=_scripted_monotonic,
     )
     with pytest.raises(FinalizationError) as error:
-        coordinator._freeze("task-1", "tree-1", 1, {}, 100.0)
+        coordinator._freeze(
+            "task-1",
+            "tree-1",
+            1,
+            FinalCaptureSnapshot(
+                head="h",
+                branch="b",
+                status=b"",
+                index=b"",
+                baseline_files=[],
+                changes=[],
+            ),
+            100.0,
+        )
     assert error.value.code == "FINAL_SNAPSHOT_TIMEOUT"
     assert seen["busy_ms"] == 1
 
