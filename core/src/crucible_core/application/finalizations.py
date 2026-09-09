@@ -11,6 +11,10 @@ from typing import Any, Callable
 
 from crucible_core.core.database import connect
 from crucible_core.core.errors import FinalizationError, ProjectError
+from crucible_core.infrastructure.git import final_capture_worker as worker
+from crucible_core.infrastructure.git.final_capture import (
+    capture_final as _canonical_capture_final,
+)
 from crucible_core.repositories import finalizations_repository as final_repo
 from crucible_core.repositories import sessions_repository as sessions_repo
 from crucible_core.repositories import tasks_repository as tasks_repo
@@ -58,6 +62,24 @@ _SERVER_FAILURE_CODES = frozenset(
         "FINAL_MATERIALIZATION_FAILED",
         "FINAL_SNAPSHOT_NOT_FROZEN",
         "TERMINAL_AUTHORIZATION_UNCONFIGURED",
+    }
+)
+
+# Parent-side worker failures superseded by a durable fence.
+# worker.WAIT_TIMEOUT_CODE is what wait_capture raises ONLY when the
+# parent itself observes its own 5s budget (spawn+capture+IPC)
+# expire. worker.IPC_FAILED_CODE is what wait_capture raises ONLY
+# for broken IPC (poll/recv EOF on a killed/cancelled child, invalid
+# envelope payload) -- never for envelope ok=False. A child-side
+# FINAL_SNAPSHOT_TIMEOUT arriving inside a genuine envelope is NOT
+# converted: it stays FINAL_SNAPSHOT_TIMEOUT after a fence, like any
+# other specific capture_final code (including a genuine envelope
+# FINALIZATION_FAILED), so pre-fence capture failures are never
+# masked.
+_FENCE_SUPERSEDED_WORKER_CODES = frozenset(
+    {
+        worker.IPC_FAILED_CODE,
+        worker.WAIT_TIMEOUT_CODE,
     }
 )
 
@@ -141,21 +163,108 @@ class FinalizationCoordinator:
         if self._clock() > not_after:
             return self._abort_expired(event, task_id, payload_hash)
 
-        try:
-            begun = self._begin(event, task_id, payload_hash, not_after)
-        except sqlite3.IntegrityError:
-            with connect(self._database_path) as connection:
-                existing = final_repo.get_finalization_event(
-                    connection, event_id
-                )
-                if existing is None:
-                    raise
-                return self._reconcile(event_id, payload_hash, existing)
-        if isinstance(begun, dict):
-            return begun
-        generation, task, input_row_id = begun
         deadline = self._monotonic() + FINAL_CAPTURE_DEADLINE_SECONDS
-        try:
+        use_worker = self._capture_final is _canonical_capture_final
+        key: Any = None
+        if use_worker:
+            # begin->registry stays atomic under the shared boundary
+            # lock; the lock is never held during Git capture (wait).
+            _pre_generation: int | None = None
+            try:
+                with worker.BOUNDARY_LOCK:
+                    try:
+                        begun = self._begin(
+                            event, task_id, payload_hash, not_after
+                        )
+                    except sqlite3.IntegrityError:
+                        with connect(self._database_path) as connection:
+                            existing = final_repo.get_finalization_event(
+                                connection, event_id
+                            )
+                            if existing is None:
+                                raise
+                            return self._reconcile(
+                                event_id, payload_hash, existing
+                            )
+                    if isinstance(begun, dict):
+                        return begun
+                    generation, task, input_row_id = begun
+                    _pre_generation = int(generation)
+                    try:
+                        project = resolve_project(event.git_root)
+                    except ProjectError as error:
+                        raise FinalizationError(str(error)) from error
+                    if project.id != str(event.project_id):
+                        raise FinalizationError("PROJECT_ID_MISMATCH")
+                    with connect(self._database_path) as connection:
+                        baseline_files = tasks_repo.list_task_baseline_files(
+                            connection, task_id
+                        )
+                    # Child enforces its own absolute deadline on its
+                    # own monotonic clock; translate the remaining
+                    # parent budget so injected parent clocks stay
+                    # deterministic.
+                    remaining = max(0.001, deadline - self._monotonic())
+                    from crucible_core.schemas.finalizations import (
+                        FinalCaptureRequest,
+                    )
+
+                    request = FinalCaptureRequest(
+                        git_root=str(task.git_root),
+                        baseline_head=str(task.baseline_head),
+                        baseline_branch=str(task.baseline_branch),
+                        baseline_index=bytes(task.baseline_index_manifest),
+                        baseline_files=list(baseline_files),
+                        max_file_size_bytes=int(
+                            project.max_snapshot_file_size_bytes
+                        ),
+                        deadline_monotonic=time.monotonic() + remaining,
+                    )
+                    key = worker.spawn_capture(
+                        request,
+                        str(task.tree_id),
+                        int(generation),
+                        task_id,
+                    )
+            except FinalizationError as pre_error:
+                if _pre_generation is not None:
+                    try:
+                        self._fail(
+                            task_id,
+                            _pre_generation,
+                            pre_error.code,
+                        )
+                    except Exception:
+                        pass
+                raise
+            except Exception:
+                if _pre_generation is not None:
+                    try:
+                        self._fail(
+                            task_id,
+                            _pre_generation,
+                            "FINALIZATION_FAILED",
+                        )
+                    except Exception:
+                        pass
+                    raise FinalizationError(
+                        "FINALIZATION_FAILED", 500
+                    ) from None
+                raise
+        else:
+            try:
+                begun = self._begin(event, task_id, payload_hash, not_after)
+            except sqlite3.IntegrityError:
+                with connect(self._database_path) as connection:
+                    existing = final_repo.get_finalization_event(
+                        connection, event_id
+                    )
+                    if existing is None:
+                        raise
+                    return self._reconcile(event_id, payload_hash, existing)
+            if isinstance(begun, dict):
+                return begun
+            generation, task, input_row_id = begun
             # resolve_project performs Git reads, so it must only run after
             # _begin's transaction has rechecked the capture window and
             # consumed the authorization; a project failure here fails the
@@ -171,24 +280,66 @@ class FinalizationCoordinator:
                 baseline_files = tasks_repo.list_task_baseline_files(
                     connection, task_id
                 )
-            snapshot = self._capture_final(
-                Path(task.git_root),
-                task.baseline_head,
-                task.baseline_branch,
-                task.baseline_index_manifest,
-                baseline_files,
-                project.max_snapshot_file_size_bytes,
-                deadline,
-            )
+        try:
+            if use_worker:
+                try:
+                    snapshot = worker.wait_capture(
+                        key, deadline, self._monotonic
+                    )
+                except FinalizationError as wait_error:
+                    if (
+                        wait_error.code in _FENCE_SUPERSEDED_WORKER_CODES
+                        and self._was_fenced(
+                            task_id, str(task.tree_id), int(generation)
+                        )
+                    ):
+                        raise FinalizationError(
+                            "STALE_CAPTURE_GENERATION", 409
+                        ) from wait_error
+                    raise
+            else:
+                snapshot = self._capture_final(
+                    Path(task.git_root),
+                    task.baseline_head,
+                    task.baseline_branch,
+                    task.baseline_index_manifest,
+                    baseline_files,
+                    project.max_snapshot_file_size_bytes,
+                    deadline,
+                )
             if self._monotonic() >= deadline:
                 raise FinalizationError("FINAL_SNAPSHOT_TIMEOUT")
             if self._publication_hook is not None:
                 self._publication_hook()
             if self._monotonic() >= deadline:
                 raise FinalizationError("FINAL_SNAPSHOT_TIMEOUT")
+            # Only the parent freezes/materializes from SQLite authority;
+            # a late worker result can never publish once
+            # publication_is_current/fence rejects it.
             self._freeze(task_id, task.tree_id, generation, snapshot, deadline)
             self.materialize(task_id)
         except FinalizationError as error:
+            if (
+                use_worker
+                and error.code in _FENCE_SUPERSEDED_WORKER_CODES
+                and self._was_fenced(
+                    task_id, str(task.tree_id), int(generation)
+                )
+            ):
+                self._fail(task_id, generation, "STALE_CAPTURE_GENERATION")
+                raise FinalizationError(
+                    "STALE_CAPTURE_GENERATION", 409
+                ) from error
+            if use_worker and error.code == worker.IPC_FAILED_CODE:
+                # Broken IPC without a fence: internal code never leaks;
+                # map to the public worker-failure contract.
+                self._fail(task_id, generation, "FINALIZATION_FAILED")
+                raise FinalizationError("FINALIZATION_FAILED", 500) from error
+            if use_worker and error.code == worker.WAIT_TIMEOUT_CODE:
+                # Parent-side timeout without a fence: internal code
+                # never leaks; map to the public timeout contract.
+                self._fail(task_id, generation, "FINAL_SNAPSHOT_TIMEOUT")
+                raise FinalizationError("FINAL_SNAPSHOT_TIMEOUT") from error
             self._fail(task_id, generation, error.code)
             raise
         except Exception:
@@ -695,6 +846,15 @@ class FinalizationCoordinator:
         if reason not in SUPPORTED_ABORT_REASONS:
             raise FinalizationError("INVALID_ABORT_REASON")
         return str(reason)
+
+    def _was_fenced(self, task_id: str, tree_id: str, generation: int) -> bool:
+        try:
+            with connect(self._database_path) as connection:
+                return not final_repo.publication_is_current(
+                    connection, task_id, tree_id, generation
+                )
+        except Exception:
+            return False
 
     def _fail(self, task_id: str, generation: int | None, code: str) -> None:
         with connect(self._database_path) as connection:

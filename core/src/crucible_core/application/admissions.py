@@ -10,6 +10,7 @@ from typing import Any
 
 from crucible_core.core.database import connect
 from crucible_core.core.errors import AdmissionError, ProjectError
+from crucible_core.infrastructure.git import final_capture_worker as worker
 from crucible_core.logging import get_logger
 from crucible_core.repositories import admissions_repository as admissions_repo
 from crucible_core.repositories import finalizations_repository as final_repo
@@ -99,6 +100,19 @@ class AdmissionCoordinator:
         if unfrozen is None:
             return
         final_repo.fence_finalization(connection, tree_id, now)
+
+    @staticmethod
+    def _cancel_tree_workers_best_effort(
+        keys: list[tuple[str, int]],
+    ) -> None:
+        # DB fence stays authoritative; cancellation only reaps the
+        # child. Failures are swallowed so the HTTP response still
+        # reflects the durable fence/decision.
+        for key in keys:
+            try:
+                worker.cancel_capture(key)
+            except Exception:
+                continue
 
     def admit(self, event: EventRequest) -> dict[str, object]:
         event_id = str(event.event_id)
@@ -1248,127 +1262,150 @@ class AdmissionCoordinator:
     ) -> dict[str, object]:
         if depth >= _MAX_ROUTE_ATTEMPTS:
             raise AdmissionError("ADMISSION_CONFLICT", 409)
+        fenced_keys: list[tuple[str, int]] = []
         try:
-            with connect(self._database_path) as connection:
-                connection.execute("BEGIN IMMEDIATE")
-                existing = admissions_repo.find_event(connection, event_id)
-                takeover_processing = False
-                if existing:
-                    if existing.payload_hash != payload_hash:
-                        connection.rollback()
-                        raise AdmissionError("IDEMPOTENCY_CONFLICT", 409)
-                    if existing.status != "processing":
-                        connection.rollback()
-                        return self._reconcile_existing(
-                            event_id, payload_hash, existing
-                        )
-                    takeover_processing = True
-                tree_id = sessions_repo.get_working_tree_id(
-                    connection, git_root
-                )
-                self._check_session_tree_mismatch(connection, event, tree_id)
-                decision = admissions_repo.find_no_input_decision(
-                    connection,
-                    event.adapter,
-                    event.agent_session_id,
-                    event.input_id,
-                )
-                if decision:
-                    connection.rollback()
-                    if decision.admission_hash != self._admission_hash(event):
-                        raise AdmissionError("IDEMPOTENCY_CONFLICT", 409)
-                    return self._replay_overlap_decision(event, event_id)
-                stored_input = tasks_repo.find_input_by_adapter_session(
-                    connection,
-                    event.adapter,
-                    event.agent_session_id,
-                    event.input_id,
-                )
-                if stored_input:
-                    connection.rollback()
-                    if stored_input.admission_hash != self._admission_hash(
-                        event
-                    ):
-                        raise AdmissionError("IDEMPOTENCY_CONFLICT", 409)
-                    stored_owner = tasks_repo.get_task_owner(
-                        connection, stored_input.task_id
-                    )
-                    self._require_execution_match(
-                        stored_owner.execution_id if stored_owner else None,
-                        event,
-                    )
-                    return self._replay_admitted_input(
-                        event, event_id, stored_input
-                    )
-                fresh_blocking = (
-                    tasks_repo.find_active_task_by_tree(connection, tree_id)
-                    if tree_id is not None
-                    else None
-                )
-                if fresh_blocking is None:
-                    connection.rollback()
-                    return self._route_without_joinable(
-                        event,
-                        event_id,
-                        payload_hash,
-                        now,
-                        git_root,
-                        deadline,
-                        depth + 1,
-                    )
-                self._fence_unfrozen_finalization_locked(
-                    connection, tree_id, now
-                )
-                try:
-                    admissions_repo.insert_no_input_decision(
-                        connection,
-                        NewNoInputDecision(
-                            adapter=event.adapter,
-                            agent_session_id=event.agent_session_id,
-                            native_input_id=event.input_id,
-                            admission_hash=self._admission_hash(event),
-                            outcome="released_overlap",
-                            event_id=event_id,
-                            reference_task_id=fresh_blocking.id,
-                            created_at=now,
-                        ),
-                    )
-                    if takeover_processing:
-                        admissions_repo.mark_event_accepted_overlap(
-                            connection, event_id
-                        )
-                    else:
-                        admissions_repo.insert_accepted_overlap_event(
-                            connection,
-                            event_id,
-                            payload_hash,
-                            event.event_type,
-                            now,
-                        )
-                    connection.commit()
-                except sqlite3.IntegrityError:
-                    connection.rollback()
-                    with connect(self._database_path) as fresh_conn:
-                        existing = admissions_repo.find_event(
-                            fresh_conn, event_id
-                        )
-                        if existing:
+            # Fence + decision persist in the same DB transaction;
+            # the shared boundary lock keeps begin->registry and
+            # fence->snapshot atomic. Cancel/reap happens after
+            # commit, still before the HTTP response; the DB fence
+            # stays authoritative if cancellation fails.
+            with worker.BOUNDARY_LOCK:
+                with connect(self._database_path) as connection:
+                    connection.execute("BEGIN IMMEDIATE")
+                    existing = admissions_repo.find_event(connection, event_id)
+                    takeover_processing = False
+                    if existing:
+                        if existing.payload_hash != payload_hash:
+                            connection.rollback()
+                            raise AdmissionError("IDEMPOTENCY_CONFLICT", 409)
+                        if existing.status != "processing":
+                            connection.rollback()
                             return self._reconcile_existing(
                                 event_id, payload_hash, existing
                             )
-                        decision = admissions_repo.find_no_input_decision(
-                            fresh_conn,
-                            event.adapter,
-                            event.agent_session_id,
-                            event.input_id,
-                        )
+                        takeover_processing = True
+                    tree_id = sessions_repo.get_working_tree_id(
+                        connection, git_root
+                    )
+                    self._check_session_tree_mismatch(
+                        connection, event, tree_id
+                    )
+                    decision = admissions_repo.find_no_input_decision(
+                        connection,
+                        event.adapter,
+                        event.agent_session_id,
+                        event.input_id,
+                    )
                     if decision:
+                        connection.rollback()
                         if decision.admission_hash != self._admission_hash(
                             event
                         ):
                             raise AdmissionError("IDEMPOTENCY_CONFLICT", 409)
                         return self._replay_overlap_decision(event, event_id)
-                    raise
+                    stored_input = tasks_repo.find_input_by_adapter_session(
+                        connection,
+                        event.adapter,
+                        event.agent_session_id,
+                        event.input_id,
+                    )
+                    if stored_input:
+                        connection.rollback()
+                        if stored_input.admission_hash != self._admission_hash(
+                            event
+                        ):
+                            raise AdmissionError("IDEMPOTENCY_CONFLICT", 409)
+                        stored_owner = tasks_repo.get_task_owner(
+                            connection, stored_input.task_id
+                        )
+                        self._require_execution_match(
+                            stored_owner.execution_id
+                            if stored_owner
+                            else None,
+                            event,
+                        )
+                        return self._replay_admitted_input(
+                            event, event_id, stored_input
+                        )
+                    fresh_blocking = (
+                        tasks_repo.find_active_task_by_tree(
+                            connection, tree_id
+                        )
+                        if tree_id is not None
+                        else None
+                    )
+                    if fresh_blocking is None:
+                        connection.rollback()
+                        return self._route_without_joinable(
+                            event,
+                            event_id,
+                            payload_hash,
+                            now,
+                            git_root,
+                            deadline,
+                            depth + 1,
+                        )
+                    self._fence_unfrozen_finalization_locked(
+                        connection, tree_id, now
+                    )
+                    try:
+                        admissions_repo.insert_no_input_decision(
+                            connection,
+                            NewNoInputDecision(
+                                adapter=event.adapter,
+                                agent_session_id=event.agent_session_id,
+                                native_input_id=event.input_id,
+                                admission_hash=self._admission_hash(event),
+                                outcome="released_overlap",
+                                event_id=event_id,
+                                reference_task_id=fresh_blocking.id,
+                                created_at=now,
+                            ),
+                        )
+                        if takeover_processing:
+                            admissions_repo.mark_event_accepted_overlap(
+                                connection, event_id
+                            )
+                        else:
+                            admissions_repo.insert_accepted_overlap_event(
+                                connection,
+                                event_id,
+                                payload_hash,
+                                event.event_type,
+                                now,
+                            )
+                        connection.commit()
+                        if tree_id is not None:
+                            fenced_keys = worker.snapshot_tree_keys(tree_id)
+                    except sqlite3.IntegrityError:
+                        connection.rollback()
+                        with connect(self._database_path) as fresh_conn:
+                            existing = admissions_repo.find_event(
+                                fresh_conn, event_id
+                            )
+                            if existing:
+                                return self._reconcile_existing(
+                                    event_id, payload_hash, existing
+                                )
+                            decision = admissions_repo.find_no_input_decision(
+                                fresh_conn,
+                                event.adapter,
+                                event.agent_session_id,
+                                event.input_id,
+                            )
+                        if decision:
+                            if decision.admission_hash != self._admission_hash(
+                                event
+                            ):
+                                raise AdmissionError(
+                                    "IDEMPOTENCY_CONFLICT", 409
+                                )
+                            return self._replay_overlap_decision(
+                                event, event_id
+                            )
+                        raise
+            if fenced_keys:
+                self._cancel_tree_workers_best_effort(fenced_keys)
             return event_response(
                 event_id, "accepted", "released_overlap", None, None
             ).model_dump()
@@ -1395,147 +1432,168 @@ class AdmissionCoordinator:
     ) -> dict[str, object] | None:
         if depth >= _MAX_ROUTE_ATTEMPTS:
             raise AdmissionError("ADMISSION_CONFLICT", 409)
-        with connect(self._database_path) as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            if self._race_hook is not None:
-                hook = self._race_hook
-                connection.commit()
-                try:
-                    hook(self._database_path, event, None)
-                finally:
-                    connection.execute("BEGIN IMMEDIATE")
-            existing = admissions_repo.find_event(connection, event_id)
-            takeover_processing = False
-            if existing:
-                if existing.payload_hash != payload_hash:
-                    connection.rollback()
-                    raise AdmissionError("IDEMPOTENCY_CONFLICT", 409)
-                if existing.status != "processing":
-                    connection.rollback()
-                    self._reconcile_existing(event_id, payload_hash, existing)
-                    raise AdmissionError("STEER_WITHOUT_ACTIVE_TASK", 409)
-                takeover_processing = True
-            tree_id = sessions_repo.get_working_tree_id(connection, git_root)
-            self._check_session_tree_mismatch(connection, event, tree_id)
-            decision = admissions_repo.find_no_input_decision(
-                connection,
-                event.adapter,
-                event.agent_session_id,
-                event.input_id,
-            )
-            if decision:
-                connection.rollback()
-                if decision.admission_hash != self._admission_hash(event):
-                    raise AdmissionError("IDEMPOTENCY_CONFLICT", 409)
-                if decision.outcome == "released_overlap":
-                    return self._replay_overlap_decision(event, event_id)
-                self._replay_steer_rejection(event, event_id)
-                raise AdmissionError("STEER_WITHOUT_ACTIVE_TASK", 409)
-            stored_input = tasks_repo.find_input_by_adapter_session(
-                connection,
-                event.adapter,
-                event.agent_session_id,
-                event.input_id,
-            )
-            if stored_input:
-                connection.rollback()
-                if stored_input.admission_hash != self._admission_hash(event):
-                    raise AdmissionError("IDEMPOTENCY_CONFLICT", 409)
-                stored_owner = tasks_repo.get_task_owner(
-                    connection, stored_input.task_id
-                )
-                self._require_execution_match(
-                    stored_owner.execution_id if stored_owner else None,
-                    event,
-                )
-                return self._replay_admitted_input(
-                    event, event_id, stored_input
-                )
-            session_row = sessions_repo.find_session_tree(
-                connection, event.adapter, event.agent_session_id
-            )
-            if session_row is not None and tree_id is not None:
-                joinable = tasks_repo.find_running_task_by_session(
-                    connection, session_row.session_id
-                )
-                if joinable is not None:
-                    owner = tasks_repo.get_task_owner(connection, joinable)
-                    if (
-                        owner is not None
-                        and owner.session_id == session_row.session_id
-                        and owner.tree_id == tree_id
-                        and owner.status == "running"
-                    ):
+        fenced_keys: list[tuple[str, int]] = []
+        with worker.BOUNDARY_LOCK:
+            with connect(self._database_path) as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                if self._race_hook is not None:
+                    hook = self._race_hook
+                    connection.commit()
+                    try:
+                        hook(self._database_path, event, None)
+                    finally:
+                        connection.execute("BEGIN IMMEDIATE")
+                existing = admissions_repo.find_event(connection, event_id)
+                takeover_processing = False
+                if existing:
+                    if existing.payload_hash != payload_hash:
                         connection.rollback()
-                        return self._join_active_task(
-                            event,
-                            event_id,
-                            payload_hash,
-                            joinable,
-                            now,
-                            git_root,
-                            deadline,
-                            depth + 1,
-                        )
-            self._fence_unfrozen_finalization_locked(connection, tree_id, now)
-            try:
-                admissions_repo.insert_no_input_decision(
-                    connection,
-                    NewNoInputDecision(
-                        adapter=event.adapter,
-                        agent_session_id=event.agent_session_id,
-                        native_input_id=event.input_id,
-                        admission_hash=self._admission_hash(event),
-                        outcome="steer_without_active_task",
-                        event_id=event_id,
-                        reference_task_id=None,
-                        created_at=now,
-                    ),
-                )
-                if takeover_processing:
-                    admissions_repo.mark_event_rejected(
-                        connection, event_id, "STEER_WITHOUT_ACTIVE_TASK"
-                    )
-                else:
-                    admissions_repo.insert_rejected_event(
-                        connection,
-                        event_id,
-                        payload_hash,
-                        event.event_type,
-                        now,
-                        "STEER_WITHOUT_ACTIVE_TASK",
-                    )
-                connection.commit()
-            except sqlite3.IntegrityError:
-                connection.rollback()
-                with connect(self._database_path) as fresh_conn:
-                    existing = admissions_repo.find_event(fresh_conn, event_id)
-                    if existing:
+                        raise AdmissionError("IDEMPOTENCY_CONFLICT", 409)
+                    if existing.status != "processing":
+                        connection.rollback()
                         self._reconcile_existing(
                             event_id, payload_hash, existing
                         )
-                        raise AdmissionError(
-                            "STEER_WITHOUT_ACTIVE_TASK", 409
-                        ) from None
-                    decision = admissions_repo.find_no_input_decision(
-                        fresh_conn,
-                        event.adapter,
-                        event.agent_session_id,
-                        event.input_id,
-                    )
+                        raise AdmissionError("STEER_WITHOUT_ACTIVE_TASK", 409)
+                    takeover_processing = True
+                tree_id = sessions_repo.get_working_tree_id(
+                    connection, git_root
+                )
+                self._check_session_tree_mismatch(connection, event, tree_id)
+                decision = admissions_repo.find_no_input_decision(
+                    connection,
+                    event.adapter,
+                    event.agent_session_id,
+                    event.input_id,
+                )
                 if decision:
+                    connection.rollback()
                     if decision.admission_hash != self._admission_hash(event):
-                        raise AdmissionError(
-                            "IDEMPOTENCY_CONFLICT", 409
-                        ) from None
+                        raise AdmissionError("IDEMPOTENCY_CONFLICT", 409)
                     if decision.outcome == "released_overlap":
                         return self._replay_overlap_decision(event, event_id)
                     self._replay_steer_rejection(event, event_id)
-                logger.warning(
-                    "admission conflict code=ADMISSION_CONFLICT event_id=%s",
-                    event_id,
+                    raise AdmissionError("STEER_WITHOUT_ACTIVE_TASK", 409)
+                stored_input = tasks_repo.find_input_by_adapter_session(
+                    connection,
+                    event.adapter,
+                    event.agent_session_id,
+                    event.input_id,
                 )
-                raise AdmissionError("ADMISSION_CONFLICT", 409) from None
+                if stored_input:
+                    connection.rollback()
+                    if stored_input.admission_hash != self._admission_hash(
+                        event
+                    ):
+                        raise AdmissionError("IDEMPOTENCY_CONFLICT", 409)
+                    stored_owner = tasks_repo.get_task_owner(
+                        connection, stored_input.task_id
+                    )
+                    self._require_execution_match(
+                        stored_owner.execution_id if stored_owner else None,
+                        event,
+                    )
+                    return self._replay_admitted_input(
+                        event, event_id, stored_input
+                    )
+                session_row = sessions_repo.find_session_tree(
+                    connection, event.adapter, event.agent_session_id
+                )
+                if session_row is not None and tree_id is not None:
+                    joinable = tasks_repo.find_running_task_by_session(
+                        connection, session_row.session_id
+                    )
+                    if joinable is not None:
+                        owner = tasks_repo.get_task_owner(connection, joinable)
+                        if (
+                            owner is not None
+                            and owner.session_id == session_row.session_id
+                            and owner.tree_id == tree_id
+                            and owner.status == "running"
+                        ):
+                            connection.rollback()
+                            return self._join_active_task(
+                                event,
+                                event_id,
+                                payload_hash,
+                                joinable,
+                                now,
+                                git_root,
+                                deadline,
+                                depth + 1,
+                            )
+                self._fence_unfrozen_finalization_locked(
+                    connection, tree_id, now
+                )
+                try:
+                    admissions_repo.insert_no_input_decision(
+                        connection,
+                        NewNoInputDecision(
+                            adapter=event.adapter,
+                            agent_session_id=event.agent_session_id,
+                            native_input_id=event.input_id,
+                            admission_hash=self._admission_hash(event),
+                            outcome="steer_without_active_task",
+                            event_id=event_id,
+                            reference_task_id=None,
+                            created_at=now,
+                        ),
+                    )
+                    if takeover_processing:
+                        admissions_repo.mark_event_rejected(
+                            connection, event_id, "STEER_WITHOUT_ACTIVE_TASK"
+                        )
+                    else:
+                        admissions_repo.insert_rejected_event(
+                            connection,
+                            event_id,
+                            payload_hash,
+                            event.event_type,
+                            now,
+                            "STEER_WITHOUT_ACTIVE_TASK",
+                        )
+                    connection.commit()
+                    if tree_id is not None:
+                        fenced_keys = worker.snapshot_tree_keys(tree_id)
+                except sqlite3.IntegrityError:
+                    connection.rollback()
+                    with connect(self._database_path) as fresh_conn:
+                        existing = admissions_repo.find_event(
+                            fresh_conn, event_id
+                        )
+                        if existing:
+                            self._reconcile_existing(
+                                event_id, payload_hash, existing
+                            )
+                            raise AdmissionError(
+                                "STEER_WITHOUT_ACTIVE_TASK", 409
+                            ) from None
+                        decision = admissions_repo.find_no_input_decision(
+                            fresh_conn,
+                            event.adapter,
+                            event.agent_session_id,
+                            event.input_id,
+                        )
+                    if decision:
+                        if decision.admission_hash != self._admission_hash(
+                            event
+                        ):
+                            raise AdmissionError(
+                                "IDEMPOTENCY_CONFLICT", 409
+                            ) from None
+                        if decision.outcome == "released_overlap":
+                            return self._replay_overlap_decision(
+                                event, event_id
+                            )
+                        self._replay_steer_rejection(event, event_id)
+                    logger.warning(
+                        "admission conflict "
+                        "code=ADMISSION_CONFLICT event_id=%s",
+                        event_id,
+                    )
+                    raise AdmissionError("ADMISSION_CONFLICT", 409) from None
+        if fenced_keys:
+            self._cancel_tree_workers_best_effort(fenced_keys)
         logger.warning(
             "admission rejected code=STEER_WITHOUT_ACTIVE_TASK event_id=%s",
             event_id,

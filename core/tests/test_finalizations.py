@@ -14,6 +14,8 @@ from fastapi.testclient import TestClient
 import crucible_core.services.finalizations as finalization_service
 from crucible_core.application.finalizations import FinalizationCoordinator
 from crucible_core.core.database import upgrade
+from crucible_core.core.errors import FinalizationError
+from crucible_core.infrastructure.git import final_capture_worker as worker
 from crucible_core.infrastructure.git.final_capture import capture_final
 from crucible_core.main import app
 
@@ -1482,3 +1484,578 @@ def test_committed_directory_to_file_reports_delete_plus_add(
     assert by_path["target"]["operation"] == "added"
     assert by_path["target/nested.txt"]["operation"] == "deleted"
     assert "target" in (detail["task_diff"] or "")
+
+
+def test_fenced_worker_late_snapshot_never_publishes(monkeypatch, tmp_path):
+    import threading
+
+    monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
+    root = tmp_path / "repo"
+    project_id = initialized_repository(root)
+    with TestClient(app) as client:
+        task_a = admit(client, project_id, root)
+        connection = sqlite3.connect(database_path(tmp_path))
+        try:
+            baseline = connection.execute(
+                "SELECT baseline_head, baseline_branch, working_tree_id "
+                "FROM tasks WHERE id = ?",
+                (task_a,),
+            ).fetchone()
+        finally:
+            connection.close()
+        baseline_head, baseline_branch, tree_id = baseline
+        event_b = {
+            "event_id": str(uuid.uuid4()),
+            "event_type": "input_candidate",
+            "occurred_at": "2026-09-07T00:00:30Z",
+            "payload_version": 1,
+            "adapter": "opencode-v1",
+            "adapter_version": "0.1.0",
+            "agent_session_id": "session-2",
+            "input_id": "input-2",
+            "execution_id": "execution-2",
+            "project_id": project_id,
+            "git_root": str(root),
+            "workspace_path": str(root),
+            "payload": {"delivery": "new"},
+        }
+        entered = threading.Event()
+        cancel_called = threading.Event()
+        state: dict[str, object] = {
+            "spawned": {},
+            "fence_durable_before_cancel": False,
+            "b_outcome": None,
+            "b_after_cancel": False,
+        }
+
+        def _fake_spawn(request, spawn_tree_id, generation, spawn_task):
+            key = (spawn_tree_id, int(generation))
+            state["spawned"][key] = {
+                "cancelled": False,
+                "task_id": spawn_task,
+            }
+            return key
+
+        def _fake_snapshot_keys(snapshot_tree_id):
+            return [
+                key for key in state["spawned"] if key[0] == snapshot_tree_id
+            ]
+
+        def _fake_cancel(key):
+            connection = sqlite3.connect(database_path(tmp_path))
+            try:
+                task = connection.execute(
+                    "SELECT status, failure_code, snapshot_frozen_at "
+                    "FROM tasks WHERE id = ?",
+                    (task_a,),
+                ).fetchone()
+                generation = connection.execute(
+                    "SELECT capture_generation FROM working_trees "
+                    "WHERE id = ?",
+                    (tree_id,),
+                ).fetchone()
+            finally:
+                connection.close()
+            # Fence/generation must already be durable before cancel.
+            state["fence_durable_before_cancel"] = (
+                task[0] == "failed"
+                and task[1] == "FINAL_CAPTURE_FENCED_BY_NEXT_INPUT"
+                and task[2] is None
+                and generation is not None
+            )
+            if key in state["spawned"]:
+                state["spawned"][key]["cancelled"] = True
+            cancel_called.set()
+            return True
+
+        def _fake_wait(key, deadline, monotonic=None):
+            entered.set()
+            # Input B fences while A is blocked in the worker.
+            b_response = client.post("/v1/events", json=event_b)
+            assert b_response.status_code == 200, b_response.text
+            body = b_response.json()["data"]["event"]
+            state["b_outcome"] = body["outcome"]
+            # B response is only produced after cancel/reap ran.
+            state["b_after_cancel"] = cancel_called.is_set()
+            # Late worker ignores cancel and still returns a snapshot;
+            # publication_is_current/fence must refuse to publish it.
+            assert state["spawned"][key]["cancelled"] is True
+            return {
+                "head": baseline_head,
+                "branch": baseline_branch,
+                "status": b"",
+                "index": b"",
+                "baseline_files": [],
+                "changes": [],
+            }
+
+        monkeypatch.setattr(worker, "spawn_capture", _fake_spawn)
+        monkeypatch.setattr(worker, "wait_capture", _fake_wait)
+        monkeypatch.setattr(worker, "snapshot_tree_keys", _fake_snapshot_keys)
+        monkeypatch.setattr(worker, "cancel_capture", _fake_cancel)
+
+        event_a = completion(project_id, root, task_a)
+        response = client.post("/v1/events", json=event_a)
+
+    assert entered.is_set()
+    assert state["fence_durable_before_cancel"] is True
+    assert state["b_outcome"] == "released_overlap"
+    assert state["b_after_cancel"] is True
+    assert response.status_code == 409
+    assert response.json()["data"]["code"] == "STALE_CAPTURE_GENERATION"
+    connection = sqlite3.connect(database_path(tmp_path))
+    try:
+        task = connection.execute(
+            "SELECT status, failure_code, snapshot_frozen_at FROM tasks "
+            "WHERE id = ?",
+            (task_a,),
+        ).fetchone()
+        changes = connection.execute(
+            "SELECT COUNT(*) FROM task_file_changes WHERE task_id = ?",
+            (task_a,),
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert task == ("failed", "FINAL_CAPTURE_FENCED_BY_NEXT_INPUT", None)
+    assert changes == 0
+
+
+def test_fenced_worker_eof_converts_to_stale(monkeypatch, tmp_path):
+    import threading
+
+    monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
+    root = tmp_path / "repo"
+    project_id = initialized_repository(root)
+    with TestClient(app) as client:
+        task_a = admit(client, project_id, root)
+        connection = sqlite3.connect(database_path(tmp_path))
+        try:
+            tree_id = connection.execute(
+                "SELECT working_tree_id FROM tasks WHERE id = ?",
+                (task_a,),
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        event_b = {
+            "event_id": str(uuid.uuid4()),
+            "event_type": "input_candidate",
+            "occurred_at": "2026-09-07T00:00:30Z",
+            "payload_version": 1,
+            "adapter": "opencode-v1",
+            "adapter_version": "0.1.0",
+            "agent_session_id": "session-2",
+            "input_id": "input-2",
+            "execution_id": "execution-2",
+            "project_id": project_id,
+            "git_root": str(root),
+            "workspace_path": str(root),
+            "payload": {"delivery": "new"},
+        }
+        entered = threading.Event()
+        cancel_called = threading.Event()
+        state: dict[str, object] = {
+            "spawned": {},
+            "fence_durable_before_cancel": False,
+            "b_outcome": None,
+            "b_after_cancel": False,
+        }
+
+        def _fake_spawn(request, spawn_tree_id, generation, spawn_task):
+            key = (spawn_tree_id, int(generation))
+            state["spawned"][key] = {
+                "cancelled": False,
+                "task_id": spawn_task,
+            }
+            return key
+
+        def _fake_snapshot_keys(snapshot_tree_id):
+            return [
+                key for key in state["spawned"] if key[0] == snapshot_tree_id
+            ]
+
+        def _fake_cancel(key):
+            connection = sqlite3.connect(database_path(tmp_path))
+            try:
+                task = connection.execute(
+                    "SELECT status, failure_code, snapshot_frozen_at "
+                    "FROM tasks WHERE id = ?",
+                    (task_a,),
+                ).fetchone()
+                generation = connection.execute(
+                    "SELECT capture_generation FROM working_trees "
+                    "WHERE id = ?",
+                    (tree_id,),
+                ).fetchone()
+            finally:
+                connection.close()
+            # Fence/generation must already be durable before cancel.
+            state["fence_durable_before_cancel"] = (
+                task[0] == "failed"
+                and task[1] == "FINAL_CAPTURE_FENCED_BY_NEXT_INPUT"
+                and task[2] is None
+                and generation is not None
+            )
+            if key in state["spawned"]:
+                state["spawned"][key]["cancelled"] = True
+            cancel_called.set()
+            return True
+
+        def _fake_wait(key, deadline, monotonic=None):
+            entered.set()
+            # Input B fences while A is blocked in the worker.
+            b_response = client.post("/v1/events", json=event_b)
+            assert b_response.status_code == 200, b_response.text
+            body = b_response.json()["data"]["event"]
+            state["b_outcome"] = body["outcome"]
+            # B response is only produced after cancel/reap ran.
+            state["b_after_cancel"] = cancel_called.is_set()
+            assert state["spawned"][key]["cancelled"] is True
+            # The pipe died with the cancelled child: recv raises
+            # EOFError, which wait_capture surfaces as the internal
+            # IPC code (never a genuine envelope code). The durable
+            # fence must supersede it.
+            raise FinalizationError(worker.IPC_FAILED_CODE, 500)
+
+        monkeypatch.setattr(worker, "spawn_capture", _fake_spawn)
+        monkeypatch.setattr(worker, "wait_capture", _fake_wait)
+        monkeypatch.setattr(worker, "snapshot_tree_keys", _fake_snapshot_keys)
+        monkeypatch.setattr(worker, "cancel_capture", _fake_cancel)
+
+        event_a = completion(project_id, root, task_a)
+        response = client.post("/v1/events", json=event_a)
+
+    assert entered.is_set()
+    assert state["fence_durable_before_cancel"] is True
+    assert state["b_outcome"] == "released_overlap"
+    assert state["b_after_cancel"] is True
+    assert response.status_code == 409
+    assert response.json()["data"]["code"] == "STALE_CAPTURE_GENERATION"
+    connection = sqlite3.connect(database_path(tmp_path))
+    try:
+        task = connection.execute(
+            "SELECT status, failure_code, snapshot_frozen_at FROM tasks "
+            "WHERE id = ?",
+            (task_a,),
+        ).fetchone()
+        changes = connection.execute(
+            "SELECT COUNT(*) FROM task_file_changes WHERE task_id = ?",
+            (task_a,),
+        ).fetchone()[0]
+        event = connection.execute(
+            "SELECT status, failure_code FROM inbound_events "
+            "WHERE event_type = 'task_completed'"
+        ).fetchone()
+    finally:
+        connection.close()
+    assert task == ("failed", "FINAL_CAPTURE_FENCED_BY_NEXT_INPUT", None)
+    assert changes == 0
+    assert event == (
+        "rejected",
+        "FINAL_CAPTURE_FENCED_BY_NEXT_INPUT",
+    )
+
+
+def test_worker_ipc_failure_without_fence_stays_500(monkeypatch, tmp_path):
+    monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
+    root = tmp_path / "repo"
+    project_id = initialized_repository(root)
+    with TestClient(app) as client:
+        task_a = admit(client, project_id, root)
+
+        def _fake_spawn(request, spawn_tree_id, generation, spawn_task):
+            return (spawn_tree_id, int(generation))
+
+        def _fake_wait(key, deadline, monotonic=None):
+            # Broken IPC without a fence: internal code maps to the
+            # public worker-failure contract, never leaks.
+            raise FinalizationError(worker.IPC_FAILED_CODE, 500)
+
+        monkeypatch.setattr(worker, "spawn_capture", _fake_spawn)
+        monkeypatch.setattr(worker, "wait_capture", _fake_wait)
+        response = client.post(
+            "/v1/events", json=completion(project_id, root, task_a)
+        )
+
+    assert response.status_code == 500
+    assert response.json()["data"]["code"] == "FINALIZATION_FAILED"
+    connection = sqlite3.connect(database_path(tmp_path))
+    try:
+        task = connection.execute(
+            "SELECT status, failure_code, snapshot_frozen_at FROM tasks "
+            "WHERE id = ?",
+            (task_a,),
+        ).fetchone()
+    finally:
+        connection.close()
+    assert task == ("failed", "FINALIZATION_FAILED", None)
+
+
+def test_fenced_worker_preserves_capture_error_code(monkeypatch, tmp_path):
+    import threading
+
+    monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
+    root = tmp_path / "repo"
+    project_id = initialized_repository(root)
+    with TestClient(app) as client:
+        task_a = admit(client, project_id, root)
+        event_b = {
+            "event_id": str(uuid.uuid4()),
+            "event_type": "input_candidate",
+            "occurred_at": "2026-09-07T00:00:30Z",
+            "payload_version": 1,
+            "adapter": "opencode-v1",
+            "adapter_version": "0.1.0",
+            "agent_session_id": "session-2",
+            "input_id": "input-2",
+            "execution_id": "execution-2",
+            "project_id": project_id,
+            "git_root": str(root),
+            "workspace_path": str(root),
+            "payload": {"delivery": "new"},
+        }
+        entered = threading.Event()
+        state: dict[str, object] = {"spawned": {}}
+
+        def _fake_spawn(request, spawn_tree_id, generation, spawn_task):
+            key = (spawn_tree_id, int(generation))
+            state["spawned"][key] = True
+            return key
+
+        def _fake_snapshot_keys(snapshot_tree_id):
+            return [
+                key for key in state["spawned"] if key[0] == snapshot_tree_id
+            ]
+
+        def _fake_wait(key, deadline, monotonic=None):
+            entered.set()
+            # Fence lands first, but the genuine capture failure the
+            # child already produced must not be masked by it.
+            b_response = client.post("/v1/events", json=event_b)
+            assert b_response.status_code == 200, b_response.text
+            raise FinalizationError("BRANCH_CHANGED_DURING_TASK")
+
+        monkeypatch.setattr(worker, "spawn_capture", _fake_spawn)
+        monkeypatch.setattr(worker, "wait_capture", _fake_wait)
+        monkeypatch.setattr(worker, "snapshot_tree_keys", _fake_snapshot_keys)
+
+        event_a = completion(project_id, root, task_a)
+        response = client.post("/v1/events", json=event_a)
+
+    assert entered.is_set()
+    assert response.status_code == 400
+    assert response.json()["data"]["code"] == "BRANCH_CHANGED_DURING_TASK"
+    connection = sqlite3.connect(database_path(tmp_path))
+    try:
+        task = connection.execute(
+            "SELECT status, failure_code, snapshot_frozen_at FROM tasks "
+            "WHERE id = ?",
+            (task_a,),
+        ).fetchone()
+    finally:
+        connection.close()
+    assert task == ("failed", "FINAL_CAPTURE_FENCED_BY_NEXT_INPUT", None)
+
+
+def test_fenced_worker_genuine_envelope_failure_stays_500(
+    monkeypatch, tmp_path
+):
+    import threading
+
+    monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
+    root = tmp_path / "repo"
+    project_id = initialized_repository(root)
+    with TestClient(app) as client:
+        task_a = admit(client, project_id, root)
+        event_b = {
+            "event_id": str(uuid.uuid4()),
+            "event_type": "input_candidate",
+            "occurred_at": "2026-09-07T00:00:30Z",
+            "payload_version": 1,
+            "adapter": "opencode-v1",
+            "adapter_version": "0.1.0",
+            "agent_session_id": "session-2",
+            "input_id": "input-2",
+            "execution_id": "execution-2",
+            "project_id": project_id,
+            "git_root": str(root),
+            "workspace_path": str(root),
+            "payload": {"delivery": "new"},
+        }
+        entered = threading.Event()
+        state: dict[str, object] = {"spawned": {}}
+
+        def _fake_spawn(request, spawn_tree_id, generation, spawn_task):
+            key = (spawn_tree_id, int(generation))
+            state["spawned"][key] = True
+            return key
+
+        def _fake_snapshot_keys(snapshot_tree_id):
+            return [
+                key for key in state["spawned"] if key[0] == snapshot_tree_id
+            ]
+
+        def _fake_wait(key, deadline, monotonic=None):
+            entered.set()
+            # Fence lands first, but a genuine envelope failure the
+            # child already reported must never convert to STALE.
+            b_response = client.post("/v1/events", json=event_b)
+            assert b_response.status_code == 200, b_response.text
+            raise FinalizationError("FINALIZATION_FAILED", 500)
+
+        monkeypatch.setattr(worker, "spawn_capture", _fake_spawn)
+        monkeypatch.setattr(worker, "wait_capture", _fake_wait)
+        monkeypatch.setattr(worker, "snapshot_tree_keys", _fake_snapshot_keys)
+
+        event_a = completion(project_id, root, task_a)
+        response = client.post("/v1/events", json=event_a)
+
+    assert entered.is_set()
+    assert response.status_code == 500
+    assert response.json()["data"]["code"] == "FINALIZATION_FAILED"
+    connection = sqlite3.connect(database_path(tmp_path))
+    try:
+        task = connection.execute(
+            "SELECT status, failure_code, snapshot_frozen_at FROM tasks "
+            "WHERE id = ?",
+            (task_a,),
+        ).fetchone()
+    finally:
+        connection.close()
+    assert task == ("failed", "FINAL_CAPTURE_FENCED_BY_NEXT_INPUT", None)
+
+
+def test_fenced_worker_envelope_timeout_preserves_code(monkeypatch, tmp_path):
+    import threading
+
+    monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
+    root = tmp_path / "repo"
+    project_id = initialized_repository(root)
+    with TestClient(app) as client:
+        task_a = admit(client, project_id, root)
+        event_b = {
+            "event_id": str(uuid.uuid4()),
+            "event_type": "input_candidate",
+            "occurred_at": "2026-09-07T00:00:30Z",
+            "payload_version": 1,
+            "adapter": "opencode-v1",
+            "adapter_version": "0.1.0",
+            "agent_session_id": "session-2",
+            "input_id": "input-2",
+            "execution_id": "execution-2",
+            "project_id": project_id,
+            "git_root": str(root),
+            "workspace_path": str(root),
+            "payload": {"delivery": "new"},
+        }
+        entered = threading.Event()
+        state: dict[str, object] = {"spawned": {}}
+
+        def _fake_spawn(request, spawn_tree_id, generation, spawn_task):
+            key = (spawn_tree_id, int(generation))
+            state["spawned"][key] = True
+            return key
+
+        def _fake_snapshot_keys(snapshot_tree_id):
+            return [
+                key for key in state["spawned"] if key[0] == snapshot_tree_id
+            ]
+
+        def _fake_wait(key, deadline, monotonic=None):
+            entered.set()
+            # Fence lands first, but a child-side timeout inside a
+            # genuine envelope must stay FINAL_SNAPSHOT_TIMEOUT.
+            b_response = client.post("/v1/events", json=event_b)
+            assert b_response.status_code == 200, b_response.text
+            raise FinalizationError("FINAL_SNAPSHOT_TIMEOUT")
+
+        monkeypatch.setattr(worker, "spawn_capture", _fake_spawn)
+        monkeypatch.setattr(worker, "wait_capture", _fake_wait)
+        monkeypatch.setattr(worker, "snapshot_tree_keys", _fake_snapshot_keys)
+
+        event_a = completion(project_id, root, task_a)
+        response = client.post("/v1/events", json=event_a)
+
+    assert entered.is_set()
+    assert response.status_code == 400
+    assert response.json()["data"]["code"] == "FINAL_SNAPSHOT_TIMEOUT"
+    connection = sqlite3.connect(database_path(tmp_path))
+    try:
+        task = connection.execute(
+            "SELECT status, failure_code, snapshot_frozen_at FROM tasks "
+            "WHERE id = ?",
+            (task_a,),
+        ).fetchone()
+    finally:
+        connection.close()
+    assert task == ("failed", "FINAL_CAPTURE_FENCED_BY_NEXT_INPUT", None)
+
+
+def test_fenced_worker_local_timeout_converts_to_stale(monkeypatch, tmp_path):
+    import threading
+
+    monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
+    root = tmp_path / "repo"
+    project_id = initialized_repository(root)
+    with TestClient(app) as client:
+        task_a = admit(client, project_id, root)
+        event_b = {
+            "event_id": str(uuid.uuid4()),
+            "event_type": "input_candidate",
+            "occurred_at": "2026-09-07T00:00:30Z",
+            "payload_version": 1,
+            "adapter": "opencode-v1",
+            "adapter_version": "0.1.0",
+            "agent_session_id": "session-2",
+            "input_id": "input-2",
+            "execution_id": "execution-2",
+            "project_id": project_id,
+            "git_root": str(root),
+            "workspace_path": str(root),
+            "payload": {"delivery": "new"},
+        }
+        entered = threading.Event()
+        state: dict[str, object] = {"spawned": {}}
+
+        def _fake_spawn(request, spawn_tree_id, generation, spawn_task):
+            key = (spawn_tree_id, int(generation))
+            state["spawned"][key] = True
+            return key
+
+        def _fake_snapshot_keys(snapshot_tree_id):
+            return [
+                key for key in state["spawned"] if key[0] == snapshot_tree_id
+            ]
+
+        def _fake_wait(key, deadline, monotonic=None):
+            entered.set()
+            # Fence lands while the parent itself observes its own
+            # wait deadline expire: still STALE, as before.
+            b_response = client.post("/v1/events", json=event_b)
+            assert b_response.status_code == 200, b_response.text
+            raise FinalizationError(worker.WAIT_TIMEOUT_CODE)
+
+        monkeypatch.setattr(worker, "spawn_capture", _fake_spawn)
+        monkeypatch.setattr(worker, "wait_capture", _fake_wait)
+        monkeypatch.setattr(worker, "snapshot_tree_keys", _fake_snapshot_keys)
+
+        event_a = completion(project_id, root, task_a)
+        response = client.post("/v1/events", json=event_a)
+
+    assert entered.is_set()
+    assert response.status_code == 409
+    assert response.json()["data"]["code"] == "STALE_CAPTURE_GENERATION"
+    connection = sqlite3.connect(database_path(tmp_path))
+    try:
+        task = connection.execute(
+            "SELECT status, failure_code, snapshot_frozen_at FROM tasks "
+            "WHERE id = ?",
+            (task_a,),
+        ).fetchone()
+        changes = connection.execute(
+            "SELECT COUNT(*) FROM task_file_changes WHERE task_id = ?",
+            (task_a,),
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert task == ("failed", "FINAL_CAPTURE_FENCED_BY_NEXT_INPUT", None)
+    assert changes == 0
