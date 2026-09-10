@@ -1,0 +1,3 @@
+version: 1
+tracking:
+  max_snapshot_file_size_bytes: 0

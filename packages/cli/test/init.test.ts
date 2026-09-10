@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import { initializeProject } from "../src/services/project-initialization.js";
@@ -56,4 +57,47 @@ test("init rejects invalid existing project metadata and configuration", () => {
     writeFileSync(join(projectDirectory, "config.yaml"), "version: 2\n");
 
     assert.throws(() => initializeProject(root), /INVALID_PROJECT_CONFIG/);
+});
+
+type ContractCase = {
+    id: string;
+    projectFile: string;
+    configFile: string | null;
+    expected: string;
+};
+
+function contractRoot(): string {
+    return resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "test", "fixtures", "project-contract");
+}
+
+test("init honors shared project-contract fixtures", () => {
+    const root = contractRoot();
+    const manifest = JSON.parse(readFileSync(join(root, "manifest.json"), "utf8")) as {
+        version: number;
+        cases: ContractCase[];
+    };
+
+    assert.equal(manifest.version, 1);
+    assert.ok(manifest.cases.length > 0);
+
+    for (const entry of manifest.cases) {
+        const repo = repository();
+        const projectDirectory = join(repo, ".crucible");
+        mkdirSync(projectDirectory, { recursive: true });
+        copyFileSync(join(root, entry.projectFile), join(projectDirectory, "project.json"));
+        if (entry.configFile) {
+            copyFileSync(join(root, entry.configFile), join(projectDirectory, "config.yaml"));
+        }
+
+        if (entry.expected === "ok") {
+            const initialized = initializeProject(repo);
+            const stored = JSON.parse(readFileSync(join(projectDirectory, "project.json"), "utf8")) as {
+                project_id: string;
+            };
+            assert.equal(initialized.id, stored.project_id, entry.id);
+            assert.ok(existsSync(join(projectDirectory, "config.yaml")), entry.id);
+        } else {
+            assert.throws(() => initializeProject(repo), new RegExp(entry.expected), entry.id);
+        }
+    }
 });

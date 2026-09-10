@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine
@@ -9,7 +11,12 @@ def _upgrade(path, revision: str) -> None:
     config = Config()
     config.set_main_option(
         "script_location",
-        "src/crucible_core/migrations",
+        str(
+            Path(__file__).resolve().parents[1]
+            / "src"
+            / "crucible_core"
+            / "migrations"
+        ),
     )
     engine = create_engine(f"sqlite:///{path.as_posix()}")
     with engine.begin() as connection:
@@ -24,7 +31,15 @@ def test_migrations_upgrade_fresh_database_to_head(tmp_path):
 
 
 def test_migrations_upgrade_supported_previous_versions_to_head(tmp_path):
-    for revision in ("0001", "0002", "0003", "0004", "0005", "0006"):
+    for revision in (
+        "0001",
+        "0002",
+        "0003",
+        "0004",
+        "0005",
+        "0006",
+        "0007",
+    ):
         database_path = tmp_path / f"{revision}.db"
         _upgrade(database_path, revision)
         if revision == "0001":
@@ -73,7 +88,7 @@ def _assert_head_tables(database_path) -> None:
             .fetchall()
         }
     assert row
-    assert revision == "0007"
+    assert revision == "0008"
     assert decisions
     assert {"path", "final_content", "patch"} <= final_columns
     assert {
@@ -91,6 +106,41 @@ def _assert_head_tables(database_path) -> None:
             .fetchall()
         }
     assert {"terminal_observed_at", "capture_not_after"} <= task_columns
+    with engine.connect() as connection:
+        event_columns = {
+            item["name"]
+            for item in connection.exec_driver_sql(
+                "PRAGMA table_info(inbound_events)"
+            )
+            .mappings()
+            .fetchall()
+        }
+    assert "semantic_hash" in event_columns
+
+
+def test_migration_0008_adds_nullable_semantic_hash(tmp_path):
+    database_path = tmp_path / "pre Semantic.db"
+    _upgrade(database_path, "0007")
+    engine = create_engine(f"sqlite:///{database_path.as_posix()}")
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "INSERT INTO inbound_events (id, payload_hash, status, "
+            "event_type, received_at, outcome) VALUES ('legacy', "
+            "'hash-legacy', 'accepted', 'input_candidate', 'now', "
+            "'admitted')"
+        )
+    _upgrade(database_path, "head")
+    with engine.connect() as connection:
+        row = (
+            connection.exec_driver_sql(
+                "SELECT payload_hash, semantic_hash FROM inbound_events "
+                "WHERE id = 'legacy'"
+            )
+            .mappings()
+            .fetchone()
+        )
+    assert row["payload_hash"] == "hash-legacy"
+    assert row["semantic_hash"] is None
 
 
 def test_migration_terminalizes_legacy_active_without_execution_id(

@@ -76,9 +76,10 @@ function validateConfig(path: string): void {
     throw new Error("INVALID_PROJECT_CONFIG: config.yaml must be valid YAML.");
   }
 
-  const tracking = (config as { tracking?: unknown }).tracking ?? {};
+  const rawTracking = (config as { tracking?: unknown }).tracking;
+  const tracking = rawTracking === undefined ? {} : rawTracking;
 
-  if (typeof tracking !== "object" || Array.isArray(tracking)) {
+  if (tracking === null || typeof tracking !== "object" || Array.isArray(tracking)) {
     throw new Error("INVALID_PROJECT_CONFIG: tracking must be a mapping.");
   }
 

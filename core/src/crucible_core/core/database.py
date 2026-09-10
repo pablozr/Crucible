@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from alembic import command
@@ -9,23 +11,38 @@ from alembic.config import Config
 from sqlalchemy import create_engine
 
 
-def connect(path: Path) -> sqlite3.Connection:
+@contextmanager
+def connect(path: Path) -> Iterator[sqlite3.Connection]:
     path.parent.mkdir(parents=True, exist_ok=True)
 
     if os.name != "nt":
         path.parent.chmod(0o700)
 
     connection = sqlite3.connect(path)
-    connection.row_factory = sqlite3.Row
+    try:
+        connection.row_factory = sqlite3.Row
 
-    connection.execute("PRAGMA foreign_keys = ON")
-    connection.execute("PRAGMA journal_mode = WAL")
-    connection.execute("PRAGMA synchronous = FULL")
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA journal_mode = WAL")
+        connection.execute("PRAGMA synchronous = FULL")
 
-    if path.exists() and os.name != "nt":
-        path.chmod(0o600)
+        if path.exists() and os.name != "nt":
+            path.chmod(0o600)
+    except Exception:
+        connection.close()
+        raise
 
-    return connection
+    try:
+        yield connection
+        connection.commit()
+    except Exception:
+        try:
+            connection.rollback()
+        except sqlite3.Error:
+            pass
+        raise
+    finally:
+        connection.close()
 
 
 def upgrade(path: Path) -> None:
@@ -33,15 +50,19 @@ def upgrade(path: Path) -> None:
         pass
 
     engine = create_engine(f"sqlite:///{path.as_posix()}")
-    config = Config()
+    try:
+        config = Config()
 
-    config.set_main_option(
-        "script_location", str(Path(__file__).parents[1] / "migrations")
-    )
+        config.set_main_option(
+            "script_location",
+            str(Path(__file__).parents[1] / "migrations"),
+        )
 
-    with engine.begin() as connection:
-        config.attributes["connection"] = connection
-        command.upgrade(config, "head")
+        with engine.begin() as connection:
+            config.attributes["connection"] = connection
+            command.upgrade(config, "head")
+    finally:
+        engine.dispose()
 
 
 def database_status(path: Path) -> dict[str, object]:

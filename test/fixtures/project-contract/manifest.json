@@ -1,0 +1,84 @@
+{
+  "version": 1,
+  "description": "Shared CLI/Core project contract: project.json must contain only a valid project_id UUID; config.yaml version must be 1 and tracking (when present) must be a mapping. tracking:null is invalid on both sides.",
+  "cases": [
+    {
+      "id": "valid-default",
+      "projectFile": "cases/valid-default/project.json",
+      "configFile": "cases/valid-default/config.yaml",
+      "expected": "ok"
+    },
+    {
+      "id": "valid-custom-limit",
+      "projectFile": "cases/valid-custom-limit/project.json",
+      "configFile": "cases/valid-custom-limit/config.yaml",
+      "expected": "ok"
+    },
+    {
+      "id": "valid-missing-tracking",
+      "projectFile": "cases/valid-missing-tracking/project.json",
+      "configFile": "cases/valid-missing-tracking/config.yaml",
+      "expected": "ok"
+    },
+    {
+      "id": "valid-missing-config",
+      "projectFile": "cases/valid-missing-config/project.json",
+      "configFile": null,
+      "expected": "ok"
+    },
+    {
+      "id": "project-null",
+      "projectFile": "cases/project-null/project.json",
+      "configFile": null,
+      "expected": "INVALID_PROJECT_METADATA"
+    },
+    {
+      "id": "project-empty-object",
+      "projectFile": "cases/project-empty-object/project.json",
+      "configFile": null,
+      "expected": "INVALID_PROJECT_METADATA"
+    },
+    {
+      "id": "tracking-null-empty",
+      "projectFile": "cases/tracking-null-empty/project.json",
+      "configFile": "cases/tracking-null-empty/config.yaml",
+      "expected": "INVALID_PROJECT_CONFIG"
+    },
+    {
+      "id": "tracking-explicit-null",
+      "projectFile": "cases/tracking-explicit-null/project.json",
+      "configFile": "cases/tracking-explicit-null/config.yaml",
+      "expected": "INVALID_PROJECT_CONFIG"
+    },
+    {
+      "id": "tracking-array",
+      "projectFile": "cases/tracking-array/project.json",
+      "configFile": "cases/tracking-array/config.yaml",
+      "expected": "INVALID_PROJECT_CONFIG"
+    },
+    {
+      "id": "invalid-version",
+      "projectFile": "cases/invalid-version/project.json",
+      "configFile": "cases/invalid-version/config.yaml",
+      "expected": "INVALID_PROJECT_CONFIG"
+    },
+    {
+      "id": "invalid-limit-zero",
+      "projectFile": "cases/invalid-limit-zero/project.json",
+      "configFile": "cases/invalid-limit-zero/config.yaml",
+      "expected": "INVALID_PROJECT_CONFIG"
+    },
+    {
+      "id": "invalid-limit-negative",
+      "projectFile": "cases/invalid-limit-negative/project.json",
+      "configFile": "cases/invalid-limit-negative/config.yaml",
+      "expected": "INVALID_PROJECT_CONFIG"
+    },
+    {
+      "id": "invalid-limit-string",
+      "projectFile": "cases/invalid-limit-string/project.json",
+      "configFile": "cases/invalid-limit-string/config.yaml",
+      "expected": "INVALID_PROJECT_CONFIG"
+    }
+  ]
+}
