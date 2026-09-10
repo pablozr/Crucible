@@ -35,7 +35,13 @@ Coding agents can change dozens of files in a single conversation. Understanding
 
 The goal is simple: make agent-written code easier to inspect, understand, and improve over time.
 
-> **Early development.** Project initialization and the local API/database foundation are implemented. Agent integration, Git task capture, and the dashboard are still planned; end-to-end tracking is not available yet.
+> **Early development.** The local Core/adapter foundation implements admission,
+> task lifecycle, event ingestion, Git baseline/final capture, and recovery.
+> A Task is one continuous execution interval containing one or more admitted
+> Inputs. Only exact OpenCode `1.18.28` is supported, as a restricted opt-in
+> profile; terminal ordering is not universal. There is no product dashboard
+> and no diagnostic UI is served (only `/v1` APIs), no CLI beyond `init`,
+> and no auto-packaged plugin.
 
 ## How it works
 
@@ -58,7 +64,7 @@ The design prioritizes reliable attribution: one active task per physical workin
 
 ### Design principles
 
-- **Task-level history.** Each instruction gets its own baseline and diff within a larger agent conversation.
+- **Task-level history.** A Task is one continuous execution interval containing one or more admitted Inputs; baseline and diff belong to the Task, not to each instruction.
 - **Local-first storage.** Repository history stays in a per-user SQLite database outside the observed repository.
 - **Uninterrupted development.** Tracking failures should let the agent continue working.
 - **Deterministic foundations.** The MVP is designed around Git and local storage, with no AI calls or external telemetry.
@@ -67,10 +73,10 @@ The design prioritizes reliable attribution: one active task per physical workin
 
 | Component | Available today | Planned next |
 | --- | --- | --- |
-| **CLI · TypeScript** | `init`: create and validate project identity and configuration | `serve`, `dashboard`, and `status` commands |
-| **Core · FastAPI** | Health/status API, SQLite migrations, project validation | Task lifecycle, event ingestion, Git snapshots, and isolated diffs |
-| **OpenCode adapter** | Not implemented | Task detection and lifecycle events |
-| **Dashboard · Angular** | Not implemented | Read-only task history and diff inspection |
+| **CLI · TypeScript** | `init`: create and validate project identity and configuration | `serve`, `dashboard`, and `status` commands (not implemented) |
+| **Core · FastAPI** | Health/status API, SQLite migrations, project validation, `POST /v1/events`, `GET /v1/events/{event_id}`, task list/detail, admission, finalization, Git capture, and startup recovery | Performance/retention measurements and final gate |
+| **OpenCode adapter** | Dispatch adapter for exact OpenCode `1.18.28` only, with durable admission, steer/overlap handling, and opt-in live probes | Broader version/profile support only with new live proof |
+| **Dashboard** | Not served (no `/` route; only `/v1` APIs) | Read-only task history remains future work |
 
 ## Getting started
 
@@ -130,7 +136,7 @@ The server listens at **`http://127.0.0.1:7331`** and applies database migration
 | [`GET /v1/health`](http://127.0.0.1:7331/v1/health) | Service health and version |
 | [`GET /v1/status`](http://127.0.0.1:7331/v1/status) | Database path, migration revision, and runtime status |
 
-The database uses your operating system's application-data directory by default. Set `CRUCIBLE_DATA_DIR` before starting the server to choose a different location. The dashboard is not served yet.
+The database uses your operating system's application-data directory by default. Set `CRUCIBLE_DATA_DIR` before starting the server to choose a different location. No dashboard or diagnostic UI is served (only `/v1` APIs).
 
 ## Development
 
