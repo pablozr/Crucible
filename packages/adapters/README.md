@@ -10,6 +10,12 @@ is missing or differs from the sent value fails open as
 `CORE_UNAVAILABLE`. Version `1.18.29` is rejected as
 `INCOMPATIBLE_OPENCODE`; only exact `1.18.28` is attempted.
 
+Terminal delivery uses the `TerminalOutbox` facade with separate SQLite
+store, HTTP reconciliation/delivery, and timer controller modules. No
+file fallback is implemented. Terminal ordering is proven only for the
+restricted opt-in live profile below; it is not a universal terminal
+contract.
+
 ## Normal tests
 
 No live runtime required.

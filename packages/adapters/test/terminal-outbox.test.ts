@@ -17,7 +17,10 @@ import {
   stopTerminalOutboxController,
   type TerminalOutboxPolicy,
 } from "../src/opencode-v1/index.js";
-import { createCanonicalCandidate } from "../src/runtime/core-client.js";
+import {
+  createCanonicalCandidate,
+  legacyNormalizedEnvelopeHash,
+} from "../src/runtime/core-client.js";
 import type { FetchImpl } from "../src/runtime/contracts.js";
 import { loadSqliteDriver } from "../src/runtime/sqlite-driver.js";
 
@@ -193,6 +196,44 @@ test("lost candidate response is never cancelled or replayed and GET binds exact
   assert.equal(gets, 1);
   assert.deepEqual([row["state"], row["task_id"], row["input_id"]], ["admitted", "task-1", "input-1"]);
   assert.equal(row["candidate_envelope"], candidate.envelope);
+});
+
+test("lost candidate response reconciles a legacy normalized Core hash", async (t) => {
+  const dataDir = mkdtempSync(join(tmpdir(), "crucible-candidate-legacy-hash-"));
+  t.after(() => rmSync(dataDir, { recursive: true, force: true }));
+  let now = NOW;
+  const outbox = await TerminalOutbox.open(policy(dataDir, { clock: () => now }));
+  const candidate = createCanonicalCandidate({
+    agentSessionId: "session-1", messageId: "input-1", executionId: "execution-1",
+    projectId: PROJECT_ID, gitRoot: "/repo", workspacePath: "/repo", delivery: "new",
+  }, { adapter: "opencode-v1", adapterVersion: "0.1.0", eventId: EVENT_ID,
+    occurredAt: "2026-09-07T00:00:00.000Z" });
+  assert.equal(
+    legacyNormalizedEnvelopeHash(candidate.envelope),
+    process.platform === "win32"
+      ? "e397958ed92e545122c8aadfcb76fd436f647a3d766b27e4089720f47322d8f7"
+      : "20d8780e4623d69f44da66d4603b713db68959859f40afe40a8e5fe036315a0e",
+  );
+  const reservation = outbox.reserveCandidate({ candidate, agentSessionId: "session-1",
+    executionId: "execution-1", projectId: PROJECT_ID, gitRoot: "/repo",
+    workspacePath: "/repo", compatibilityProfile: TERMINAL_COMPATIBILITY_PROFILE,
+    reconciliationDelayMs: 1 })!;
+  now += 1;
+
+  await outbox.deliverDue({ ...CORE_OPTIONS, fetchImpl: async () => new Response(JSON.stringify({
+    status: "ok", data: { event: { event_id: EVENT_ID, status: "accepted",
+      outcome: "admitted", input_id: "input-1", task_id: "task-1",
+      dispatch_authorized: true,
+      payload_hash: legacyNormalizedEnvelopeHash(candidate.envelope) } },
+  })) });
+
+  const database = new DatabaseSync(outbox.databasePath, { readOnly: true });
+  const row = database.prepare("SELECT state, task_id FROM terminal_outbox WHERE id = ?")
+    .get(reservation) as { state: string; task_id: string };
+  database.close();
+  outbox.close();
+  assert.equal(row.state, "admitted");
+  assert.equal(row.task_id, "task-1");
 });
 
 test("candidate GET hash mismatch remains reserved", async (t) => {
@@ -667,6 +708,31 @@ test("abort delivery survives lost response and restart with stable id and bytes
   }
 });
 
+test("abort lost response reconciles a legacy normalized Core hash", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "crucible-abort-legacy-hash-"));
+  const { outbox, reservation } = await abortedRow(dataDir, "TERMINAL_SIGNAL_MISMATCH");
+  try {
+    const seeded = abortRow(outbox, reservation);
+    const delivery = await outbox.deliver({ ...CORE_OPTIONS,
+      fetchImpl: async (_url, init) => {
+        if (init?.method === "POST") throw new Error("lost response");
+        return new Response(JSON.stringify({ status: "ok", data: { event: {
+          event_id: seeded.abort_event_id, status: "rejected", outcome: "rejected",
+          input_id: "input-row-1", task_id: "task-1", dispatch_authorized: false,
+          payload_hash: legacyNormalizedEnvelopeHash(seeded.abort_envelope),
+          failure_code: "TERMINAL_SIGNAL_MISMATCH",
+        } } }));
+      },
+    }, reservation);
+    assert.equal(delivery?.terminal, true);
+    assert.equal(delivery?.accepted, false);
+    assert.equal(abortRow(outbox, reservation).accounted_bytes, 0);
+  } finally {
+    outbox.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("uncorrelated abort responses retain the durable abort", async () => {
   const dataDir = mkdtempSync(join(tmpdir(), "crucible-outbox-abort-mismatch-"));
   const { outbox, reservation } = await abortedRow(dataDir, "TERMINAL_OBSERVER_FAILED");
@@ -745,6 +811,31 @@ test("retry after restart reuses immutable event id and bytes and reconciles los
   assert.equal(retryBytes, firstBytes);
   assert.equal(JSON.parse(retryBytes).event_id, COMPLETION_ID);
   assert.equal(delivery?.terminal, true);
+});
+
+test("completion lost response reconciles a legacy normalized Core hash", async (t) => {
+  const dataDir = mkdtempSync(join(tmpdir(), "crucible-completion-legacy-hash-"));
+  t.after(() => rmSync(dataDir, { recursive: true, force: true }));
+  const outbox = await TerminalOutbox.open(policy(dataDir));
+  const reservation = outbox.reserve("session-1", "execution-1", TERMINAL_COMPATIBILITY_PROFILE)!;
+  outbox.bindAdmission(reservation, "task-1", "input-1");
+  outbox.storeCompletion(reservation, completionInput());
+  let envelope = "";
+
+  const delivery = await outbox.deliver({ ...CORE_OPTIONS,
+    fetchImpl: async (_url, init) => {
+      if (init?.method === "POST") {
+        envelope = String(init.body);
+        throw new Error("lost response");
+      }
+      return new Response(JSON.stringify(
+        detail(COMPLETION_ID, legacyNormalizedEnvelopeHash(envelope)),
+      ));
+    },
+  }, reservation);
+  outbox.close();
+  assert.equal(delivery?.terminal, true);
+  assert.equal(delivery?.accepted, true);
 });
 
 test("started controller retries elapsed backoff without another dispatch", async (t) => {
@@ -1305,4 +1396,66 @@ test("oversized candidate envelope is rejected before the candidate POST and fai
   assert.equal(unresolvedCharge(outbox), 0);
   assert.ok(outbox.reserve("new", "new", TERMINAL_COMPATIBILITY_PROFILE));
   outbox.close();
+});
+
+test("controller exposes the compatible TerminalOutbox facade and timers stay out of the store", async (t) => {
+  const dataDir = mkdtempSync(join(tmpdir(), "crucible-outbox-facade-compat-"));
+  t.after(() => rmSync(dataDir, { recursive: true, force: true }));
+  const controllerPolicy = policy(dataDir);
+  const controller = await TerminalOutboxController.open(controllerPolicy, { ...CORE_OPTIONS,
+    fetchImpl: async () => { throw new Error("no core"); },
+  });
+  try {
+    assert.ok(controller.outbox instanceof TerminalOutbox);
+    assert.equal(typeof controller.outbox.deliver, "function");
+    assert.equal(typeof controller.outbox.deliverDue, "function");
+    assert.equal(controller.reservationBytes, controller.outbox.reservationBytes);
+    // Boundary: delivery internals live on the store, never on the facade.
+    // A public `extends TerminalOutboxStore` would leak them via the
+    // prototype into the .d.ts; private composition keeps them out while
+    // deliver/deliverDue keep working through the internal store.
+    for (const internal of [
+      "releaseCandidate",
+      "retryCandidate",
+      "finishDelivery",
+      "retryDelivery",
+      "leaseDelivery",
+      "listDueCandidates",
+      "listDueDeliveryIds",
+    ]) {
+      assert.equal(internal in controller.outbox, false, `${internal} leaks onto TerminalOutbox`);
+      assert.equal(
+        internal in TerminalOutbox.prototype,
+        false,
+        `${internal} leaks onto TerminalOutbox.prototype`,
+      );
+    }
+    // The preserved pre-R7 surface still delegates through the facade.
+    for (const member of [
+      "databasePath",
+      "driverName",
+      "reservationBytes",
+      "close",
+      "reserve",
+      "reserveCandidate",
+      "cancelReservation",
+      "bindAdmission",
+      "reconcileCandidateResponse",
+      "markAborted",
+      "storeCompletionForAdmission",
+      "markAdmissionAborted",
+      "storeCompletion",
+      "nextWakeAt",
+      "deliver",
+      "deliverDue",
+    ]) {
+      assert.equal(member in controller.outbox, true, `${member} missing on TerminalOutbox`);
+    }
+  } finally {
+    await controller.stop();
+  }
+
+  const storeModule = await import("../src/runtime/terminal-outbox/terminal-outbox-store.js");
+  assert.equal("createTerminalOutboxPolicy" in storeModule, false);
+  assert.equal(typeof createTerminalOutboxPolicy().timer.schedule, "function");
 });

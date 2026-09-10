@@ -1,0 +1,437 @@
+{
+  "version": 1,
+  "generator": "core EventRequest.model_dump(mode=json, exclude_none=True) with git_root/workspace_path re-normalized via PurePosixPath (== PosixPath lexical rules on POSIX hosts) + canonical_json_sha256",
+  "cases": [
+    {
+      "id": "millis-z",
+      "description": "occurred_at with .123Z millis is padded to micros",
+      "envelope": {
+        "adapter": "opencode-v1",
+        "adapter_version": "0.1.0",
+        "agent_session_id": "session-1",
+        "event_id": "123e4567-e89b-42d3-a456-426614174001",
+        "event_type": "input_candidate",
+        "execution_id": "execution-1",
+        "git_root": "/repo",
+        "input_id": "input-1",
+        "occurred_at": "2026-09-06T00:00:00.123Z",
+        "payload": {
+          "delivery": "new"
+        },
+        "payload_version": 1,
+        "project_id": "123e4567-e89b-42d3-a456-426614174000",
+        "workspace_path": "/repo"
+      },
+      "dumped": {
+        "event_id": "123e4567-e89b-42d3-a456-426614174001",
+        "event_type": "input_candidate",
+        "occurred_at": "2026-09-06T00:00:00.123000Z",
+        "payload_version": 1,
+        "adapter": "opencode-v1",
+        "adapter_version": "0.1.0",
+        "agent_session_id": "session-1",
+        "input_id": "input-1",
+        "execution_id": "execution-1",
+        "project_id": "123e4567-e89b-42d3-a456-426614174000",
+        "git_root": "/repo",
+        "workspace_path": "/repo",
+        "payload": {
+          "delivery": "new"
+        }
+      },
+      "legacy_hash": "1c3463b265e642ceaadd01229242cb68cb8c79041af2e685e6df01b816c994ce"
+    },
+    {
+      "id": "plus-offset-zero",
+      "description": "UTC +00:00 offset normalizes to Z",
+      "envelope": {
+        "adapter": "opencode-v1",
+        "adapter_version": "0.1.0",
+        "agent_session_id": "session-1",
+        "event_id": "123e4567-e89b-42d3-a456-426614174001",
+        "event_type": "input_candidate",
+        "execution_id": "execution-1",
+        "git_root": "/repo",
+        "input_id": "input-1",
+        "occurred_at": "2026-09-06T00:00:00+00:00",
+        "payload": {
+          "delivery": "new"
+        },
+        "payload_version": 1,
+        "project_id": "123e4567-e89b-42d3-a456-426614174000",
+        "workspace_path": "/repo"
+      },
+      "dumped": {
+        "event_id": "123e4567-e89b-42d3-a456-426614174001",
+        "event_type": "input_candidate",
+        "occurred_at": "2026-09-06T00:00:00Z",
+        "payload_version": 1,
+        "adapter": "opencode-v1",
+        "adapter_version": "0.1.0",
+        "agent_session_id": "session-1",
+        "input_id": "input-1",
+        "execution_id": "execution-1",
+        "project_id": "123e4567-e89b-42d3-a456-426614174000",
+        "git_root": "/repo",
+        "workspace_path": "/repo",
+        "payload": {
+          "delivery": "new"
+        }
+      },
+      "legacy_hash": "e4b393f59e92e32f19817bfdf224a54174d2f5f79fac4411a7ce87d9bd79b311"
+    },
+    {
+      "id": "micros-truncate",
+      "description": "7-digit fraction truncates to 6 micros digits",
+      "envelope": {
+        "adapter": "opencode-v1",
+        "adapter_version": "0.1.0",
+        "agent_session_id": "session-1",
+        "event_id": "123e4567-e89b-42d3-a456-426614174001",
+        "event_type": "input_candidate",
+        "execution_id": "execution-1",
+        "git_root": "/repo",
+        "input_id": "input-1",
+        "occurred_at": "2026-09-06T00:00:00.1234567Z",
+        "payload": {
+          "delivery": "new"
+        },
+        "payload_version": 1,
+        "project_id": "123e4567-e89b-42d3-a456-426614174000",
+        "workspace_path": "/repo"
+      },
+      "dumped": {
+        "event_id": "123e4567-e89b-42d3-a456-426614174001",
+        "event_type": "input_candidate",
+        "occurred_at": "2026-09-06T00:00:00.123456Z",
+        "payload_version": 1,
+        "adapter": "opencode-v1",
+        "adapter_version": "0.1.0",
+        "agent_session_id": "session-1",
+        "input_id": "input-1",
+        "execution_id": "execution-1",
+        "project_id": "123e4567-e89b-42d3-a456-426614174000",
+        "git_root": "/repo",
+        "workspace_path": "/repo",
+        "payload": {
+          "delivery": "new"
+        }
+      },
+      "legacy_hash": "3e9a4d97127e041956d521c90b2903b08cdab5359c77cf1b8f49fd6d88228aea"
+    },
+    {
+      "id": "unicode-payload",
+      "description": "non-ASCII payload escapes identically (ensure_ascii)",
+      "envelope": {
+        "adapter": "opencode-v1",
+        "adapter_version": "0.1.0",
+        "agent_session_id": "session-1",
+        "event_id": "123e4567-e89b-42d3-a456-426614174001",
+        "event_type": "input_candidate",
+        "execution_id": "execution-1",
+        "git_root": "/repo",
+        "input_id": "input-1",
+        "occurred_at": "2026-09-06T00:00:00Z",
+        "payload": {
+          "delivery": "new",
+          "prompt": "café ☃ 漢字"
+        },
+        "payload_version": 1,
+        "project_id": "123e4567-e89b-42d3-a456-426614174000",
+        "workspace_path": "/repo"
+      },
+      "dumped": {
+        "event_id": "123e4567-e89b-42d3-a456-426614174001",
+        "event_type": "input_candidate",
+        "occurred_at": "2026-09-06T00:00:00Z",
+        "payload_version": 1,
+        "adapter": "opencode-v1",
+        "adapter_version": "0.1.0",
+        "agent_session_id": "session-1",
+        "input_id": "input-1",
+        "execution_id": "execution-1",
+        "project_id": "123e4567-e89b-42d3-a456-426614174000",
+        "git_root": "/repo",
+        "workspace_path": "/repo",
+        "payload": {
+          "delivery": "new",
+          "prompt": "café ☃ 漢字"
+        }
+      },
+      "legacy_hash": "efff550fca4fa2a889157e2def9471152a97492deb8ab79350dc03344f06aaa9"
+    },
+    {
+      "id": "trailing-separator",
+      "description": "trailing path separator is stripped",
+      "envelope": {
+        "adapter": "opencode-v1",
+        "adapter_version": "0.1.0",
+        "agent_session_id": "session-1",
+        "event_id": "123e4567-e89b-42d3-a456-426614174001",
+        "event_type": "input_candidate",
+        "execution_id": "execution-1",
+        "git_root": "/repo/sub/",
+        "input_id": "input-1",
+        "occurred_at": "2026-09-06T00:00:00Z",
+        "payload": {
+          "delivery": "new"
+        },
+        "payload_version": 1,
+        "project_id": "123e4567-e89b-42d3-a456-426614174000",
+        "workspace_path": "/repo/sub/"
+      },
+      "dumped": {
+        "event_id": "123e4567-e89b-42d3-a456-426614174001",
+        "event_type": "input_candidate",
+        "occurred_at": "2026-09-06T00:00:00Z",
+        "payload_version": 1,
+        "adapter": "opencode-v1",
+        "adapter_version": "0.1.0",
+        "agent_session_id": "session-1",
+        "input_id": "input-1",
+        "execution_id": "execution-1",
+        "project_id": "123e4567-e89b-42d3-a456-426614174000",
+        "git_root": "/repo/sub",
+        "workspace_path": "/repo/sub",
+        "payload": {
+          "delivery": "new"
+        }
+      },
+      "legacy_hash": "ca19dfb021d468418776cf20de941cdac87577b6d3afafdd3b50c79405a94b0f"
+    },
+    {
+      "id": "dot-segment",
+      "description": "/./ segments collapse lexically",
+      "envelope": {
+        "adapter": "opencode-v1",
+        "adapter_version": "0.1.0",
+        "agent_session_id": "session-1",
+        "event_id": "123e4567-e89b-42d3-a456-426614174001",
+        "event_type": "input_candidate",
+        "execution_id": "execution-1",
+        "git_root": "/repo/./sub",
+        "input_id": "input-1",
+        "occurred_at": "2026-09-06T00:00:00Z",
+        "payload": {
+          "delivery": "new"
+        },
+        "payload_version": 1,
+        "project_id": "123e4567-e89b-42d3-a456-426614174000",
+        "workspace_path": "/repo/./sub"
+      },
+      "dumped": {
+        "event_id": "123e4567-e89b-42d3-a456-426614174001",
+        "event_type": "input_candidate",
+        "occurred_at": "2026-09-06T00:00:00Z",
+        "payload_version": 1,
+        "adapter": "opencode-v1",
+        "adapter_version": "0.1.0",
+        "agent_session_id": "session-1",
+        "input_id": "input-1",
+        "execution_id": "execution-1",
+        "project_id": "123e4567-e89b-42d3-a456-426614174000",
+        "git_root": "/repo/sub",
+        "workspace_path": "/repo/sub",
+        "payload": {
+          "delivery": "new"
+        }
+      },
+      "legacy_hash": "ca19dfb021d468418776cf20de941cdac87577b6d3afafdd3b50c79405a94b0f"
+    },
+    {
+      "id": "repeated-separators",
+      "description": "repeated separators collapse",
+      "envelope": {
+        "adapter": "opencode-v1",
+        "adapter_version": "0.1.0",
+        "agent_session_id": "session-1",
+        "event_id": "123e4567-e89b-42d3-a456-426614174001",
+        "event_type": "input_candidate",
+        "execution_id": "execution-1",
+        "git_root": "/repo//sub",
+        "input_id": "input-1",
+        "occurred_at": "2026-09-06T00:00:00Z",
+        "payload": {
+          "delivery": "new"
+        },
+        "payload_version": 1,
+        "project_id": "123e4567-e89b-42d3-a456-426614174000",
+        "workspace_path": "/repo//sub"
+      },
+      "dumped": {
+        "event_id": "123e4567-e89b-42d3-a456-426614174001",
+        "event_type": "input_candidate",
+        "occurred_at": "2026-09-06T00:00:00Z",
+        "payload_version": 1,
+        "adapter": "opencode-v1",
+        "adapter_version": "0.1.0",
+        "agent_session_id": "session-1",
+        "input_id": "input-1",
+        "execution_id": "execution-1",
+        "project_id": "123e4567-e89b-42d3-a456-426614174000",
+        "git_root": "/repo/sub",
+        "workspace_path": "/repo/sub",
+        "payload": {
+          "delivery": "new"
+        }
+      },
+      "legacy_hash": "ca19dfb021d468418776cf20de941cdac87577b6d3afafdd3b50c79405a94b0f"
+    },
+    {
+      "id": "uppercase-uuids",
+      "description": "UUIDs lowercase in the dump",
+      "envelope": {
+        "adapter": "opencode-v1",
+        "adapter_version": "0.1.0",
+        "agent_session_id": "session-1",
+        "event_id": "123E4567-E89B-42D3-A456-426614174001",
+        "event_type": "input_candidate",
+        "execution_id": "execution-1",
+        "git_root": "/repo",
+        "input_id": "input-1",
+        "occurred_at": "2026-09-06T00:00:00Z",
+        "payload": {
+          "delivery": "new"
+        },
+        "payload_version": 1,
+        "project_id": "123E4567-E89B-42D3-A456-426614174000",
+        "workspace_path": "/repo"
+      },
+      "dumped": {
+        "event_id": "123e4567-e89b-42d3-a456-426614174001",
+        "event_type": "input_candidate",
+        "occurred_at": "2026-09-06T00:00:00Z",
+        "payload_version": 1,
+        "adapter": "opencode-v1",
+        "adapter_version": "0.1.0",
+        "agent_session_id": "session-1",
+        "input_id": "input-1",
+        "execution_id": "execution-1",
+        "project_id": "123e4567-e89b-42d3-a456-426614174000",
+        "git_root": "/repo",
+        "workspace_path": "/repo",
+        "payload": {
+          "delivery": "new"
+        }
+      },
+      "legacy_hash": "e4b393f59e92e32f19817bfdf224a54174d2f5f79fac4411a7ce87d9bd79b311"
+    },
+    {
+      "id": "posix-root",
+      "description": "filesystem root stays the root",
+      "envelope": {
+        "adapter": "opencode-v1",
+        "adapter_version": "0.1.0",
+        "agent_session_id": "session-1",
+        "event_id": "123e4567-e89b-42d3-a456-426614174001",
+        "event_type": "input_candidate",
+        "execution_id": "execution-1",
+        "git_root": "/",
+        "input_id": "input-1",
+        "occurred_at": "2026-09-06T00:00:00Z",
+        "payload": {
+          "delivery": "new"
+        },
+        "payload_version": 1,
+        "project_id": "123e4567-e89b-42d3-a456-426614174000",
+        "workspace_path": "/"
+      },
+      "dumped": {
+        "event_id": "123e4567-e89b-42d3-a456-426614174001",
+        "event_type": "input_candidate",
+        "occurred_at": "2026-09-06T00:00:00Z",
+        "payload_version": 1,
+        "adapter": "opencode-v1",
+        "adapter_version": "0.1.0",
+        "agent_session_id": "session-1",
+        "input_id": "input-1",
+        "execution_id": "execution-1",
+        "project_id": "123e4567-e89b-42d3-a456-426614174000",
+        "git_root": "/",
+        "workspace_path": "/",
+        "payload": {
+          "delivery": "new"
+        }
+      },
+      "legacy_hash": "2060934d5414b28c8685c0341e02be6740f3dfee485562c80013bba93d66a128"
+    },
+    {
+      "id": "relative-path",
+      "description": "relative paths keep working directory semantics",
+      "envelope": {
+        "adapter": "opencode-v1",
+        "adapter_version": "0.1.0",
+        "agent_session_id": "session-1",
+        "event_id": "123e4567-e89b-42d3-a456-426614174001",
+        "event_type": "input_candidate",
+        "execution_id": "execution-1",
+        "git_root": "repo/sub/",
+        "input_id": "input-1",
+        "occurred_at": "2026-09-06T00:00:00Z",
+        "payload": {
+          "delivery": "new"
+        },
+        "payload_version": 1,
+        "project_id": "123e4567-e89b-42d3-a456-426614174000",
+        "workspace_path": "repo/sub/"
+      },
+      "dumped": {
+        "event_id": "123e4567-e89b-42d3-a456-426614174001",
+        "event_type": "input_candidate",
+        "occurred_at": "2026-09-06T00:00:00Z",
+        "payload_version": 1,
+        "adapter": "opencode-v1",
+        "adapter_version": "0.1.0",
+        "agent_session_id": "session-1",
+        "input_id": "input-1",
+        "execution_id": "execution-1",
+        "project_id": "123e4567-e89b-42d3-a456-426614174000",
+        "git_root": "repo/sub",
+        "workspace_path": "repo/sub",
+        "payload": {
+          "delivery": "new"
+        }
+      },
+      "legacy_hash": "b8e98e5ad388a16196f6592d97acf5c64627fd22c88aa9735beb683f806daa6b"
+    },
+    {
+      "id": "double-slash-root",
+      "description": "exactly two leading slashes are preserved (POSIX); three or more collapse",
+      "envelope": {
+        "adapter": "opencode-v1",
+        "adapter_version": "0.1.0",
+        "agent_session_id": "session-1",
+        "event_id": "123e4567-e89b-42d3-a456-426614174001",
+        "event_type": "input_candidate",
+        "execution_id": "execution-1",
+        "git_root": "//repo/sub/",
+        "input_id": "input-1",
+        "occurred_at": "2026-09-06T00:00:00Z",
+        "payload": {
+          "delivery": "new"
+        },
+        "payload_version": 1,
+        "project_id": "123e4567-e89b-42d3-a456-426614174000",
+        "workspace_path": "//repo/sub/"
+      },
+      "dumped": {
+        "event_id": "123e4567-e89b-42d3-a456-426614174001",
+        "event_type": "input_candidate",
+        "occurred_at": "2026-09-06T00:00:00Z",
+        "payload_version": 1,
+        "adapter": "opencode-v1",
+        "adapter_version": "0.1.0",
+        "agent_session_id": "session-1",
+        "input_id": "input-1",
+        "execution_id": "execution-1",
+        "project_id": "123e4567-e89b-42d3-a456-426614174000",
+        "git_root": "//repo/sub",
+        "workspace_path": "//repo/sub",
+        "payload": {
+          "delivery": "new"
+        }
+      },
+      "legacy_hash": "e4f4ed917313918e77cb00dd6aef87cfb1d0baad621754b4571c016143668ad1"
+    }
+  ]
+}

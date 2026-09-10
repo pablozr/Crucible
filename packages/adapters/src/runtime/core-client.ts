@@ -40,6 +40,101 @@ export function canonicalJson(value: unknown): string {
   return typeof value === "string" ? jsonString(value) : JSON.stringify(value);
 }
 
+function pydanticDatetime(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  const match = /^(\d{4}-\d{2}-\d{2})[Tt ](\d{2}:\d{2}:\d{2})(?:\.(\d+))?([Zz]|[+-]\d{2}:?\d{2})$/.exec(value);
+  if (!match) return value;
+  const micros = match[3]?.slice(0, 6).padEnd(6, "0");
+  const fraction = micros && Number(micros) !== 0 ? `.${micros}` : "";
+  // Pydantic serializes a zero UTC offset as Z, never as +00:00.
+  let timezone = match[4];
+  if (timezone.toUpperCase() === "Z") {
+    timezone = "Z";
+  } else {
+    const withColon = timezone.length === 5
+      ? `${timezone.slice(0, 3)}:${timezone.slice(3)}`
+      : timezone;
+    timezone = /^([+-])00:?00$/.test(withColon) ? "Z" : withColon;
+  }
+  return `${match[1]}T${match[2]}${fraction}${timezone}`;
+}
+
+// Lexical PurePosixPath normalization as applied by Pydantic Path on
+// POSIX hosts: repeats collapse, single-dot segments resolve, trailing
+// separators strip (the root itself stays "/"). Exactly two leading
+// slashes are preserved (POSIX implementation-defined double slash);
+// three or more collapse to one. ".." is preserved
+// lexically (never resolved against the filesystem); backslashes are
+// ordinary filename characters and pass through untouched.
+export function pydanticPosixPath(value: string): string {
+  if (value === "") return ".";
+  const rooted = value.startsWith("/");
+  const doubleSlashRoot = rooted && value.startsWith("//") && !value.startsWith("///");
+  const prefix = doubleSlashRoot ? "//" : rooted ? "/" : "";
+  const segments: string[] = [];
+  for (const segment of value.split("/")) {
+    if (segment === "" || segment === ".") continue;
+    segments.push(segment);
+  }
+  if (segments.length === 0) return rooted ? prefix || "/" : ".";
+  return `${prefix}${segments.join("/")}`;
+}
+// Lexical PureWindowsPath normalization as applied by Pydantic Path on
+// Windows: separators unify to backslash, repeats collapse, single-dot
+// segments resolve and trailing separators strip. ".." is preserved
+// lexically (never resolved against the filesystem).
+export function pydanticWindowsPath(value: string): string {
+  const slashed = value.replaceAll("/", "\\");
+  let prefix = "";
+  let rest = slashed;
+  if (rest.startsWith("\\\\") && rest[2] !== "\\") {
+    prefix = "\\\\";
+    rest = rest.slice(2);
+  } else {
+    const drive = /^[A-Za-z]:/.exec(rest);
+    if (drive) {
+      prefix = drive[0];
+      rest = rest.slice(2);
+    }
+    if (rest.startsWith("\\")) {
+      prefix += "\\";
+    }
+  }
+  const segments: string[] = [];
+  for (const segment of rest.split("\\")) {
+    if (segment === "" || segment === ".") continue;
+    segments.push(segment);
+  }
+  if (segments.length === 0) return prefix;
+  return `${prefix}${prefix.endsWith("\\") || prefix === "" ? "" : "\\"}${segments.join("\\")}`;
+}
+
+/** Hash used by Core before transport-byte hashing was introduced. The
+ * path normalization follows the platform the adapter runs on, mirroring
+ * the Pydantic Path behavior of a Core on the same platform. Only the
+ * exact transport SHA-256 or this envelope-derived fallback is accepted
+ * downstream — never an arbitrary hash. */
+export function legacyNormalizedEnvelopeHash(canonicalEnvelope: string): string {
+  const envelope = JSON.parse(canonicalEnvelope) as Record<string, unknown>;
+  const normalizePath = (path: unknown): unknown => {
+    if (typeof path !== "string") return path;
+    return process.platform === "win32" ? pydanticWindowsPath(path) : pydanticPosixPath(path);
+  };
+  const normalized = {
+    ...envelope,
+    event_id: typeof envelope["event_id"] === "string"
+      ? envelope["event_id"].toLowerCase()
+      : envelope["event_id"],
+    occurred_at: pydanticDatetime(envelope["occurred_at"]),
+    project_id: typeof envelope["project_id"] === "string"
+      ? envelope["project_id"].toLowerCase()
+      : envelope["project_id"],
+    git_root: normalizePath(envelope["git_root"]),
+    workspace_path: normalizePath(envelope["workspace_path"]),
+  };
+  return createHash("sha256").update(canonicalJson(normalized)).digest("hex");
+}
+
 export function createCanonicalCandidate(
   input: CandidateInput,
   options: { adapter: string; adapterVersion: string; eventId?: string; occurredAt?: string },
