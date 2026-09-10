@@ -8,8 +8,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-import crucible_core.services.admissions as admissions_service
-from crucible_core.main import app
+from crucible_core.main import app, build_app
 
 
 def initialized_repository(tmp_path: Path) -> str:
@@ -108,13 +107,13 @@ def test_new_joins_same_session_task(monkeypatch, tmp_path):
             "/v1/events",
             json=make_event(project_id, tmp_path / "repo"),
         ).json()["data"]["event"]
-        calls = []
+    calls = []
 
-        def _fail(*args, **kwargs):
-            calls.append(1)
-            raise AssertionError("baseline must not be captured")
+    def _fail(*args, **kwargs):
+        calls.append(1)
+        raise AssertionError("baseline must not be captured")
 
-        monkeypatch.setattr(admissions_service, "_capture_baseline", _fail)
+    with TestClient(build_app(capture_baseline=_fail)) as client:
         second = client.post(
             "/v1/events",
             json=make_event(
@@ -143,13 +142,11 @@ def test_steer_joins_same_task_without_recapture(monkeypatch, tmp_path):
             "/v1/events",
             json=make_event(project_id, tmp_path / "repo"),
         ).json()["data"]["event"]
-        monkeypatch.setattr(
-            admissions_service,
-            "_capture_baseline",
-            lambda *a, **k: (_ for _ in ()).throw(
-                AssertionError("no capture")
-            ),
-        )
+
+    def _no_capture(*a, **k):
+        raise AssertionError("no capture")
+
+    with TestClient(build_app(capture_baseline=_no_capture)) as client:
         steered = client.post(
             "/v1/events",
             json=make_event(
@@ -172,12 +169,11 @@ def test_steer_joins_same_task_without_recapture(monkeypatch, tmp_path):
 def test_steer_without_active_task_is_409(monkeypatch, tmp_path):
     monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
     project_id = initialized_repository(tmp_path / "repo")
-    monkeypatch.setattr(
-        admissions_service,
-        "_capture_baseline",
-        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no capture")),
-    )
-    with TestClient(app) as client:
+
+    def _no_capture(*a, **k):
+        raise AssertionError("no capture")
+
+    with TestClient(build_app(capture_baseline=_no_capture)) as client:
         response = client.post(
             "/v1/events",
             json=make_event(project_id, tmp_path / "repo", delivery="steer"),
@@ -213,13 +209,11 @@ def test_cross_session_new_is_released_overlap(monkeypatch, tmp_path):
             "/v1/events",
             json=make_event(project_id, tmp_path / "repo"),
         ).json()["data"]["event"]
-        monkeypatch.setattr(
-            admissions_service,
-            "_capture_baseline",
-            lambda *a, **k: (_ for _ in ()).throw(
-                AssertionError("no capture")
-            ),
-        )
+
+    def _no_capture(*a, **k):
+        raise AssertionError("no capture")
+
+    with TestClient(build_app(capture_baseline=_no_capture)) as client:
         overlap = client.post(
             "/v1/events",
             json=make_event(
@@ -366,6 +360,11 @@ def test_finalizing_task_is_not_joinable(monkeypatch, tmp_path):
             "/v1/events",
             json=make_event(project_id, tmp_path / "repo"),
         ).json()["data"]["event"]
+
+    def _no_capture(*a, **k):
+        raise AssertionError("no capture")
+
+    with TestClient(build_app(capture_baseline=_no_capture)) as client:
         connection = sqlite3.connect(db_path(tmp_path))
         try:
             connection.execute(
@@ -375,13 +374,6 @@ def test_finalizing_task_is_not_joinable(monkeypatch, tmp_path):
             connection.commit()
         finally:
             connection.close()
-        monkeypatch.setattr(
-            admissions_service,
-            "_capture_baseline",
-            lambda *a, **k: (_ for _ in ()).throw(
-                AssertionError("no capture")
-            ),
-        )
         same_session_new = client.post(
             "/v1/events",
             json=make_event(
@@ -451,22 +443,16 @@ def test_race_after_capture_reroutes_to_overlap(monkeypatch, tmp_path):
         finally:
             connection.close()
 
-    monkeypatch.setattr(
-        admissions_service, "_RACE_HOOK", _insert_competing_task
-    )
-    try:
-        with TestClient(app) as client:
-            response = client.post(
-                "/v1/events",
-                json=make_event(
-                    project_id,
-                    tmp_path / "repo",
-                    session="session-late",
-                    input_id="input-late",
-                ),
-            )
-    finally:
-        monkeypatch.setattr(admissions_service, "_RACE_HOOK", None)
+    with TestClient(build_app(race_hook=_insert_competing_task)) as client:
+        response = client.post(
+            "/v1/events",
+            json=make_event(
+                project_id,
+                tmp_path / "repo",
+                session="session-late",
+                input_id="input-late",
+            ),
+        )
     assert response.status_code == 200
     body = response.json()["data"]["event"]
     assert body["outcome"] == "released_overlap"
@@ -482,71 +468,66 @@ def test_steer_race_joins_new_task(monkeypatch, tmp_path):
             "/v1/events",
             json=make_event(project_id, tmp_path / "repo"),
         ).json()["data"]["event"]
-        connection = sqlite3.connect(db_path(tmp_path))
+    connection = sqlite3.connect(db_path(tmp_path))
+    try:
+        connection.execute(
+            "UPDATE tasks SET status = 'completed' WHERE id = ?",
+            (first["task_id"],),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    race_task_id: dict = {"id": None}
+
+    def _insert_race_task(database_path, event, candidate_id):
+        connection = sqlite3.connect(database_path)
         try:
+            tree_id = connection.execute(
+                "SELECT id FROM working_trees LIMIT 1"
+            ).fetchone()[0]
+            session_id = str(uuid.uuid4())
             connection.execute(
-                "UPDATE tasks SET status = 'completed' WHERE id = ?",
-                (first["task_id"],),
+                "INSERT INTO sessions (id, working_tree_id, "
+                "adapter, agent_session_id, adapter_version, "
+                "workspace_path) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    session_id,
+                    tree_id,
+                    "test-adapter",
+                    "session-race",
+                    "1.0",
+                    str(tmp_path / "repo"),
+                ),
+            )
+            task_id = str(uuid.uuid4())
+            race_task_id["id"] = task_id
+            connection.execute(
+                "INSERT INTO tasks (id, session_id, "
+                "working_tree_id, status, started_at, execution_id) "
+                "VALUES (?, ?, ?, 'running', ?, ?)",
+                (
+                    task_id,
+                    session_id,
+                    tree_id,
+                    "2026-09-06T00:00:00Z",
+                    event.execution_id or "execution-1",
+                ),
             )
             connection.commit()
         finally:
             connection.close()
-        race_task_id = {"id": None}
 
-        def _insert_race_task(database_path, event, candidate_id):
-            connection = sqlite3.connect(database_path)
-            try:
-                tree_id = connection.execute(
-                    "SELECT id FROM working_trees LIMIT 1"
-                ).fetchone()[0]
-                session_id = str(uuid.uuid4())
-                connection.execute(
-                    "INSERT INTO sessions (id, working_tree_id, "
-                    "adapter, agent_session_id, adapter_version, "
-                    "workspace_path) VALUES (?, ?, ?, ?, ?, ?)",
-                    (
-                        session_id,
-                        tree_id,
-                        "test-adapter",
-                        "session-race",
-                        "1.0",
-                        str(tmp_path / "repo"),
-                    ),
-                )
-                task_id = str(uuid.uuid4())
-                race_task_id["id"] = task_id
-                connection.execute(
-                    "INSERT INTO tasks (id, session_id, "
-                    "working_tree_id, status, started_at, execution_id) "
-                    "VALUES (?, ?, ?, 'running', ?, ?)",
-                    (
-                        task_id,
-                        session_id,
-                        tree_id,
-                        "2026-09-06T00:00:00Z",
-                        event.execution_id or "execution-1",
-                    ),
-                )
-                connection.commit()
-            finally:
-                connection.close()
-
-        monkeypatch.setattr(
-            admissions_service, "_RACE_HOOK", _insert_race_task
+    with TestClient(build_app(race_hook=_insert_race_task)) as client:
+        response = client.post(
+            "/v1/events",
+            json=make_event(
+                project_id,
+                tmp_path / "repo",
+                delivery="steer",
+                session="session-race",
+                input_id="input-steer-race",
+            ),
         )
-        try:
-            response = client.post(
-                "/v1/events",
-                json=make_event(
-                    project_id,
-                    tmp_path / "repo",
-                    delivery="steer",
-                    session="session-race",
-                    input_id="input-steer-race",
-                ),
-            )
-        finally:
-            monkeypatch.setattr(admissions_service, "_RACE_HOOK", None)
     assert response.status_code == 200
     body = response.json()["data"]["event"]
     assert body["status"] == "accepted"

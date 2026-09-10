@@ -14,3 +14,7 @@ def canonical_json_sha256(payload: dict[str, Any]) -> str:
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
+
+
+def transport_json_sha256(raw_body: bytes) -> str:
+    return hashlib.sha256(raw_body).hexdigest()

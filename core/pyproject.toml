@@ -33,7 +33,7 @@ select = ["E", "W", "F", "I"]
 [tool.ruff.lint.per-file-ignores]
 "src/crucible_core/migrations/versions/*.py" = ["E501"]
 "src/crucible_core/services/admissions.py" = ["E501"]
-"src/crucible_core/application/admissions.py" = ["E501"]
+"src/crucible_core/application/admissions/*.py" = ["E501"]
 "tests/test_admissions.py" = ["E501"]
 "tests/test_migrations.py" = ["E501"]
 

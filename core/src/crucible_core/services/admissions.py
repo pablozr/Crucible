@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +12,10 @@ from crucible_core.application.admissions import (
 )
 from crucible_core.core.database import connect
 from crucible_core.core.errors import AdmissionError
-from crucible_core.infrastructure.git.baseline_capture import capture_baseline
+from crucible_core.infrastructure.git import final_capture_worker as worker
+from crucible_core.infrastructure.git.baseline_capture import (
+    capture_baseline as _default_capture_baseline,
+)
 from crucible_core.logging import get_logger
 from crucible_core.repositories import admissions_repository as admissions_repo
 from crucible_core.repositories import tasks_repository as tasks_repo
@@ -21,6 +25,7 @@ from crucible_core.responses.admissions import (
     task_summary,
 )
 from crucible_core.schemas.admissions import EventRequest
+from crucible_core.schemas.git import BaselineCaptureSnapshot
 
 __all__ = [
     "AdmissionError",
@@ -35,27 +40,41 @@ __all__ = [
 
 logger = get_logger(__name__)
 
-# Temporary injection points for tests. The lifecycle owns the
-# canonical workflow; these globals only forward current values.
-_capture_baseline = capture_baseline
 
-_RACE_HOOK: Any = None
-
-
-def admit_event(database_path: Path, event: EventRequest) -> dict[str, object]:
+def admit_event(
+    database_path: Path,
+    event: EventRequest,
+    payload_hash: str | None = None,
+    capture_runner: worker.CaptureRunner | None = None,
+    *,
+    capture_baseline: (
+        Callable[[Path, int, float], BaselineCaptureSnapshot] | None
+    ) = None,
+    race_hook: Any | None = None,
+) -> dict[str, object]:
     lifecycle = AdmissionCoordinator(
         database_path,
-        capture_baseline=_capture_baseline,
-        race_hook=_RACE_HOOK,
+        capture_baseline=capture_baseline or _default_capture_baseline,
+        race_hook=race_hook,
+        capture_runner=capture_runner or worker.get_default_runner(),
     )
-    return lifecycle.admit(event)
+    return lifecycle.admit(event, payload_hash)
 
 
-def reconcile_incomplete_admissions(database_path: Path) -> None:
+def reconcile_incomplete_admissions(
+    database_path: Path,
+    capture_runner: worker.CaptureRunner | None = None,
+    *,
+    capture_baseline: (
+        Callable[[Path, int, float], BaselineCaptureSnapshot] | None
+    ) = None,
+    race_hook: Any | None = None,
+) -> None:
     lifecycle = AdmissionCoordinator(
         database_path,
-        capture_baseline=_capture_baseline,
-        race_hook=_RACE_HOOK,
+        capture_baseline=capture_baseline or _default_capture_baseline,
+        race_hook=race_hook,
+        capture_runner=capture_runner or worker.get_default_runner(),
     )
     lifecycle.reconcile_incomplete()
 
@@ -83,11 +102,10 @@ def list_tasks(
     cursor_task_id: str | None = None
     if cursor:
         try:
-            started_at, cursor_task_id = json.loads(
-                base64.urlsafe_b64decode(cursor).decode()
-            )
+            decoded = json.loads(base64.urlsafe_b64decode(cursor).decode())
         except (
             ValueError,
+            TypeError,
             UnicodeDecodeError,
             json.JSONDecodeError,
             binascii.Error,
@@ -95,12 +113,16 @@ def list_tasks(
             logger.warning("task list failed code=INVALID_CURSOR")
             raise AdmissionError("INVALID_CURSOR", 400) from None
         if not (
-            isinstance(started_at, str)
-            and isinstance(cursor_task_id, str)
-            and started_at
-            and cursor_task_id
+            isinstance(decoded, list)
+            and len(decoded) == 2
+            and isinstance(decoded[0], str)
+            and isinstance(decoded[1], str)
+            and decoded[0]
+            and decoded[1]
         ):
+            logger.warning("task list failed code=INVALID_CURSOR")
             raise AdmissionError("INVALID_CURSOR", 400)
+        started_at, cursor_task_id = decoded
     with connect(database_path) as connection:
         rows = tasks_repo.list_tasks_page(
             connection, started_at, cursor_task_id, limit

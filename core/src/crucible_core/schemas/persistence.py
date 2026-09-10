@@ -5,6 +5,7 @@ from pydantic import BaseModel
 
 class InboundEvent(BaseModel):
     payload_hash: str
+    semantic_hash: str | None = None
     status: str
     outcome: str
     input_id: str | None = None
@@ -18,6 +19,7 @@ class InboundEventDetail(BaseModel):
     input_id: str | None = None
     task_id: str | None = None
     payload_hash: str
+    semantic_hash: str | None = None
     failure_code: str | None = None
 
 
@@ -58,6 +60,7 @@ class TaskOwnerRef(BaseModel):
 
 class FinalizationEventRow(BaseModel):
     payload_hash: str
+    semantic_hash: str | None = None
     status: str
     outcome: str
     input_id: str | None = None
@@ -175,6 +178,7 @@ class InputRef(BaseModel):
 class NewAcceptedEvent(BaseModel):
     event_id: str
     payload_hash: str
+    semantic_hash: str | None = None
     event_type: str
     received_at: str
     input_id: str

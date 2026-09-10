@@ -40,6 +40,8 @@ def resolve_project(directory: Path) -> Project:
 
     try:
         metadata = json.loads(project_file.read_text(encoding="utf-8"))
+        if not isinstance(metadata, dict):
+            raise ValueError
         project_id = metadata["project_id"]
 
         if set(metadata) != {"project_id"} or not isinstance(project_id, str):

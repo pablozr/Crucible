@@ -16,22 +16,58 @@ from crucible_core.schemas.persistence import (
 )
 
 
+def _has_semantic_hash(connection: sqlite3.Connection) -> bool:
+    saved = connection.row_factory
+    try:
+        connection.row_factory = None
+        rows = connection.execute(
+            "PRAGMA table_info(inbound_events)"
+        ).fetchall()
+    finally:
+        connection.row_factory = saved
+    return any(row[1] == "semantic_hash" for row in rows)
+
+
 def find_event(
     connection: sqlite3.Connection, event_id: str
 ) -> InboundEvent | None:
     connection.row_factory = sqlite3.Row
-    row = connection.execute(
-        "SELECT payload_hash AS payload_hash, status AS status, "
-        "outcome AS outcome, input_id AS input_id, task_id AS task_id, "
-        "failure_code AS failure_code "
-        "FROM inbound_events WHERE id = ?",
-        (event_id,),
-    ).fetchone()
+    try:
+        row = connection.execute(
+            "SELECT payload_hash AS payload_hash, "
+            "semantic_hash AS semantic_hash, status AS status, "
+            "outcome AS outcome, input_id AS input_id, task_id AS task_id, "
+            "failure_code AS failure_code "
+            "FROM inbound_events WHERE id = ?",
+            (event_id,),
+        ).fetchone()
+    except sqlite3.OperationalError as error:
+        if "semantic_hash" not in str(error):
+            raise
+        row = connection.execute(
+            "SELECT payload_hash AS payload_hash, status AS status, "
+            "outcome AS outcome, input_id AS input_id, task_id AS task_id, "
+            "failure_code AS failure_code "
+            "FROM inbound_events WHERE id = ?",
+            (event_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return InboundEvent(
+            payload_hash=row["payload_hash"],
+            semantic_hash=None,
+            status=row["status"],
+            outcome=row["outcome"],
+            input_id=row["input_id"],
+            task_id=row["task_id"],
+            failure_code=row["failure_code"],
+        )
     if row is None:
         return None
 
     return InboundEvent(
         payload_hash=row["payload_hash"],
+        semantic_hash=row["semantic_hash"],
         status=row["status"],
         outcome=row["outcome"],
         input_id=row["input_id"],
@@ -44,13 +80,38 @@ def find_event_detail(
     connection: sqlite3.Connection, event_id: str
 ) -> InboundEventDetail | None:
     connection.row_factory = sqlite3.Row
-    row = connection.execute(
-        "SELECT status AS status, outcome AS outcome, input_id AS input_id, "
-        "task_id AS task_id, payload_hash AS payload_hash, "
-        "failure_code AS failure_code "
-        "FROM inbound_events WHERE id = ?",
-        (event_id,),
-    ).fetchone()
+    try:
+        row = connection.execute(
+            "SELECT status AS status, outcome AS outcome, "
+            "input_id AS input_id, task_id AS task_id, "
+            "payload_hash AS payload_hash, "
+            "semantic_hash AS semantic_hash, "
+            "failure_code AS failure_code "
+            "FROM inbound_events WHERE id = ?",
+            (event_id,),
+        ).fetchone()
+    except sqlite3.OperationalError as error:
+        if "semantic_hash" not in str(error):
+            raise
+        row = connection.execute(
+            "SELECT status AS status, outcome AS outcome, "
+            "input_id AS input_id, task_id AS task_id, "
+            "payload_hash AS payload_hash, "
+            "failure_code AS failure_code "
+            "FROM inbound_events WHERE id = ?",
+            (event_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return InboundEventDetail(
+            status=row["status"],
+            outcome=row["outcome"],
+            input_id=row["input_id"],
+            task_id=row["task_id"],
+            payload_hash=row["payload_hash"],
+            semantic_hash=None,
+            failure_code=row["failure_code"],
+        )
     if row is None:
         return None
 
@@ -60,6 +121,7 @@ def find_event_detail(
         input_id=row["input_id"],
         task_id=row["task_id"],
         payload_hash=row["payload_hash"],
+        semantic_hash=row["semantic_hash"],
         failure_code=row["failure_code"],
     )
 
@@ -92,7 +154,23 @@ def insert_processing_event(
     payload_hash: str,
     event_type: str,
     received_at: str,
+    semantic_hash: str | None = None,
 ) -> None:
+    if _has_semantic_hash(connection):
+        connection.execute(
+            "INSERT INTO inbound_events "
+            "(id, payload_hash, semantic_hash, status, event_type, "
+            "received_at, outcome) "
+            "VALUES (?, ?, ?, 'processing', ?, ?, 'candidate')",
+            (
+                event_id,
+                payload_hash,
+                semantic_hash,
+                event_type,
+                received_at,
+            ),
+        )
+        return
     connection.execute(
         "INSERT INTO inbound_events "
         "(id, payload_hash, status, event_type, received_at, outcome) "
@@ -104,6 +182,22 @@ def insert_processing_event(
 def insert_accepted_event(
     connection: sqlite3.Connection, event: NewAcceptedEvent
 ) -> None:
+    if _has_semantic_hash(connection):
+        connection.execute(
+            "INSERT INTO inbound_events (id, payload_hash, semantic_hash, "
+            "status, event_type, received_at, outcome, input_id, task_id) "
+            "VALUES (?, ?, ?, 'accepted', ?, ?, 'admitted', ?, ?)",
+            (
+                event.event_id,
+                event.payload_hash,
+                event.semantic_hash,
+                event.event_type,
+                event.received_at,
+                event.input_id,
+                event.task_id,
+            ),
+        )
+        return
     connection.execute(
         "INSERT INTO inbound_events (id, payload_hash, status, "
         "event_type, received_at, outcome, input_id, task_id) "
@@ -125,7 +219,22 @@ def insert_accepted_overlap_event(
     payload_hash: str,
     event_type: str,
     received_at: str,
+    semantic_hash: str | None = None,
 ) -> None:
+    if _has_semantic_hash(connection):
+        connection.execute(
+            "INSERT INTO inbound_events (id, payload_hash, semantic_hash, "
+            "status, event_type, received_at, outcome) "
+            "VALUES (?, ?, ?, 'accepted', ?, ?, 'released_overlap')",
+            (
+                event_id,
+                payload_hash,
+                semantic_hash,
+                event_type,
+                received_at,
+            ),
+        )
+        return
     connection.execute(
         "INSERT INTO inbound_events (id, payload_hash, status, "
         "event_type, received_at, outcome) "
@@ -141,7 +250,25 @@ def insert_rejected_event(
     event_type: str,
     received_at: str,
     code: str,
+    semantic_hash: str | None = None,
 ) -> None:
+    if _has_semantic_hash(connection):
+        connection.execute(
+            "INSERT INTO inbound_events "
+            "(id, payload_hash, semantic_hash, status, event_type, "
+            "received_at, outcome, failure_code, failure_message) "
+            "VALUES (?, ?, ?, 'rejected', ?, ?, 'rejected', ?, ?)",
+            (
+                event_id,
+                payload_hash,
+                semantic_hash,
+                event_type,
+                received_at,
+                code,
+                code,
+            ),
+        )
+        return
     connection.execute(
         "INSERT INTO inbound_events "
         "(id, payload_hash, status, event_type, "
@@ -279,6 +406,17 @@ def mark_candidate_promoted(
         "outcome = "
         "'admitted', input_id = ? WHERE id = ?",
         (input_id, candidate_id),
+    )
+
+
+def mark_candidate_superseded(
+    connection: sqlite3.Connection, candidate_id: str, code: str
+) -> None:
+    connection.execute(
+        "UPDATE admission_candidates SET status = 'expired', "
+        "outcome = 'superseded', failure_code = ?, "
+        "failure_message = ? WHERE id = ?",
+        (code, code, candidate_id),
     )
 
 

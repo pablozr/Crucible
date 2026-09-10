@@ -6,8 +6,11 @@ import sqlite3
 import subprocess
 import uuid
 
+import pytest
 from fastapi.testclient import TestClient
 
+from crucible_core.application.admissions import decisions
+from crucible_core.core.errors import AdmissionError
 from crucible_core.main import app
 
 
@@ -281,3 +284,80 @@ def test_project_failure_logs_each_caught_exception(
     ]
     assert len(warnings) == 3
     assert event["event_id"] in warnings[-1].getMessage()
+
+
+def _route(delivery, joinable, blocking):
+    return decisions.decide_route(
+        decisions.RoutingObservation(
+            delivery=delivery,
+            has_joinable=joinable,
+            has_blocking=blocking,
+        )
+    )
+
+
+def test_pure_route_covers_delivery_and_task_matrix():
+    assert _route("new", False, False) == "candidate"
+    assert _route("new", True, False) == "join"
+    assert _route("new", True, True) == "join"
+    assert _route("new", False, True) == "overlap"
+    assert _route("steer", True, False) == "join"
+    assert _route("steer", True, True) == "join"
+    assert _route("steer", False, False) == "steer_without_task"
+    assert _route("steer", False, True) == "steer_without_task"
+
+
+def test_pure_owned_running_task_invariant():
+    owned = decisions.TaskOwnership(
+        session_id="session", tree_id="tree", status="running"
+    )
+    assert decisions.is_owned_running_task(owned, "session", "tree") is True
+    assert decisions.is_owned_running_task(None, "session", "tree") is False
+    finalizing = decisions.TaskOwnership(
+        session_id="session", tree_id="tree", status="finalizing"
+    )
+    assert (
+        decisions.is_owned_running_task(finalizing, "session", "tree") is False
+    )
+    other_session = decisions.TaskOwnership(
+        session_id="other", tree_id="tree", status="running"
+    )
+    assert (
+        decisions.is_owned_running_task(other_session, "session", "tree")
+        is False
+    )
+    other_tree = decisions.TaskOwnership(
+        session_id="session", tree_id="other", status="running"
+    )
+    assert (
+        decisions.is_owned_running_task(other_tree, "session", "tree") is False
+    )
+
+
+def test_pure_session_tree_mismatch():
+    assert decisions.is_session_tree_mismatch(None, None) is False
+    assert decisions.is_session_tree_mismatch(None, "tree") is False
+    assert decisions.is_session_tree_mismatch("tree", "tree") is False
+    assert decisions.is_session_tree_mismatch("other", "tree") is True
+    assert decisions.is_session_tree_mismatch("tree", None) is True
+
+
+def test_pure_execution_match_divergence():
+    decisions.check_execution_match("execution-1", "execution-1")
+    with pytest.raises(AdmissionError):
+        decisions.check_execution_match(None, "execution-1")
+    with pytest.raises(AdmissionError):
+        decisions.check_execution_match("execution-1", None)
+    with pytest.raises(AdmissionError):
+        decisions.check_execution_match("execution-1", "execution-2")
+
+
+def test_pure_no_input_outcome_mapping():
+    assert (
+        decisions.decide_no_input_outcome("released_overlap")
+        == "released_overlap"
+    )
+    assert (
+        decisions.decide_no_input_outcome("steer_without_active_task")
+        == "steer_rejection"
+    )
