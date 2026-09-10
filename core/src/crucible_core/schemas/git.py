@@ -18,9 +18,18 @@ class IndexEntry:
 class HashedContent:
     """Chunked hash result with retained payload.
 
-    ``data`` is the gzip-compressed payload (or ``None`` when oversize
-    or binary) for worktree hashing, and the raw retained bytes for
-    streamed blobs. Callers distinguish via context, never position.
+    ``data`` encoding depends on the producer and must not be guessed:
+
+    - :func:`hash_worktree_file` returns gzip-compressed snapshot bytes
+      (``None`` when oversize or binary), ready to persist as
+      ``BaselineFileRow.content`` via ``bytes(data)``.
+    - :func:`hash_stream` returns RAW retained bytes (a ``bytearray`` of
+      at most ``max_size + 1`` bytes). Convert them with
+      ``evidence_content.snapshot_bytes_for_raw``; never pass them to a
+      decompressor.
+
+    Capture code must use ``evidence_content`` codecs instead of calling
+    ``gzip`` directly so the direction (raw vs snapshot) stays explicit.
     """
 
     sha256: str

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import gzip
-import hashlib
 import os
 import subprocess
 import time
@@ -10,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from crucible_core.core.errors import FinalizationError
+from crucible_core.infrastructure.git import evidence_content
 from crucible_core.infrastructure.git.content_hash import (
     HashBudget,
     hash_stream,
@@ -577,30 +576,22 @@ def _read_head_file(
         return None
     if _is_gitlink_entry(entry):
         return _gitlink_row(path, "  ", entry)
-    # Regular blobs and symlink targets stream via ``git show``; symlink
-    # link bytes are preserved by the caller as structural evidence.
-    streamed = _stream_git_blob_to_row(
-        root, head, path, "  ", max_size, deadline, tick, budget
+    # Regular blobs and symlink targets stream via ``git show``; the raw
+    # stream bytes feed symlink evidence directly (no snapshot
+    # compress/decompress round-trip). Binary/oversize link blobs keep
+    # the honest non-symlink fallback, as before.
+    raw_hashed = _stream_git_blob_raw(
+        root, head, path, max_size, deadline, tick, budget
     )
     if _is_symlink_entry(entry):
-        link_bytes: bytes | None = None
-        if streamed.content is not None:
-            try:
-                link_bytes = gzip.decompress(bytes(streamed.content))
-            except OSError:
-                link_bytes = None
-        if link_bytes is not None:
-            return _symlink_row(path, "  ", link_bytes, max_size)
-        return BaselineFileRow(
-            path=streamed.path,
-            status="  ",
-            sha256=streamed.sha256,
-            size=streamed.size,
-            is_binary=streamed.is_binary,
-            content=streamed.content,
-            mode=entry.mode,
-            gitlink_oid=None,
+        if not raw_hashed.is_binary and raw_hashed.size <= max_size:
+            return _symlink_row(path, "  ", bytes(raw_hashed.data), max_size)
+        return _snapshot_row_from_raw(
+            path, "  ", raw_hashed, entry.mode, max_size, deadline, tick
         )
+    streamed = _snapshot_row_from_raw(
+        path, "  ", raw_hashed, None, max_size, deadline, tick
+    )
     return _regular_blob_row(path, "  ", streamed, entry)
 
 
@@ -621,46 +612,25 @@ def _read_final_head_file(
     if _is_gitlink_entry(entry):
         return _gitlink_row(path, _CLEAN_FINAL_STATUS, entry)
     if _is_symlink_entry(entry):
-        streamed = _stream_git_blob_to_row(
-            root,
-            head,
+        raw_hashed = _stream_git_blob_raw(
+            root, head, path, max_size, deadline, tick, budget
+        )
+        if not raw_hashed.is_binary and raw_hashed.size <= max_size:
+            return _symlink_row(
+                path, _CLEAN_FINAL_STATUS, bytes(raw_hashed.data), max_size
+            )
+        return _snapshot_row_from_raw(
             path,
             _CLEAN_FINAL_STATUS,
+            raw_hashed,
+            entry.mode,
             max_size,
             deadline,
             tick,
-            budget,
-        )
-        link_bytes: bytes | None = None
-        if streamed.content is not None:
-            try:
-                link_bytes = gzip.decompress(bytes(streamed.content))
-            except OSError:
-                link_bytes = None
-        if link_bytes is not None:
-            return _symlink_row(
-                path, _CLEAN_FINAL_STATUS, link_bytes, max_size
-            )
-        return BaselineFileRow(
-            path=streamed.path,
-            status=_CLEAN_FINAL_STATUS,
-            sha256=streamed.sha256,
-            size=streamed.size,
-            is_binary=streamed.is_binary,
-            content=streamed.content,
-            mode=entry.mode,
-            gitlink_oid=None,
         )
     if entry.kind != "blob" or entry.mode not in _REGULAR_BLOB_MODES:
-        return BaselineFileRow(
-            path=path,
-            status=_CLEAN_FINAL_STATUS,
-            sha256=None,
-            size=None,
-            is_binary=None,
-            content=None,
-            mode=entry.mode,
-            gitlink_oid=None,
+        return evidence_content.structural_row(
+            path, _CLEAN_FINAL_STATUS, mode=entry.mode
         )
     streamed = _stream_git_blob_to_row(
         root,
@@ -916,36 +886,16 @@ def _symlink_row(
     path: str, status: str, link_bytes: bytes, max_size: int
 ) -> BaselineFileRow:
     # Preserve link target bytes without following the destination.
-    # Structural mode 120000 is persisted; target hash/bytes prove
-    # no-follow (destination content never hashed).
-    digest = hashlib.sha256(link_bytes).hexdigest()
-    saved = None
-    if len(link_bytes) <= max_size:
-        saved = gzip.compress(bytes(link_bytes))
-    return BaselineFileRow(
-        path=path,
-        status=status,
-        sha256=digest,
-        size=len(link_bytes),
-        is_binary=0,
-        content=saved,
-        mode="120000",
-        gitlink_oid=None,
-    )
+    # Hashing/compression lives in evidence_content; this wrapper keeps
+    # the historic helper path used by capture code and tests.
+    return evidence_content.symlink_row(path, status, link_bytes, max_size)
 
 
 def _gitlink_row(path: str, status: str, entry: _TreeEntry) -> BaselineFileRow:
     # Structural gitlink identity: mode + commit OID, never internal
     # content. OID/mode advances always surface as changes.
-    return BaselineFileRow(
-        path=path,
-        status=status,
-        sha256=None,
-        size=None,
-        is_binary=None,
-        content=None,
-        mode=entry.mode,
-        gitlink_oid=entry.oid,
+    return evidence_content.gitlink_row(
+        path, status, mode=entry.mode, oid=entry.oid
     )
 
 
@@ -955,15 +905,14 @@ def _regular_blob_row(
     row: BaselineFileRow,
     entry: _TreeEntry | None,
 ) -> BaselineFileRow:
-    return BaselineFileRow(
-        path=row.path,
-        status=status,
+    return evidence_content.regular_blob_row(
+        path,
+        status,
         sha256=row.sha256,
         size=row.size,
         is_binary=row.is_binary,
         content=row.content,
         mode=entry.mode if entry is not None else None,
-        gitlink_oid=None,
     )
 
 
@@ -1031,41 +980,17 @@ def _freeze_baseline_entry(
     if _is_gitlink_entry(entry):
         return _gitlink_row(path, "  ", entry)
     if not _is_symlink_entry(entry) and not _is_regular_entry(entry):
-        return BaselineFileRow(
-            path=path,
-            status="  ",
-            sha256=None,
-            size=None,
-            is_binary=None,
-            content=None,
-            mode=entry.mode,
-            gitlink_oid=None,
-        )
-    streamed = _stream_git_blob_to_row(
-        root, head, path, "  ", max_size, deadline, tick, budget
+        return evidence_content.structural_row(path, "  ", mode=entry.mode)
+    streamed_raw = _stream_git_blob_raw(
+        root, head, path, max_size, deadline, tick, budget
     )
     if _is_symlink_entry(entry):
-        link_bytes: bytes | None = None
-        if streamed.content is not None:
-            try:
-                link_bytes = gzip.decompress(bytes(streamed.content))
-            except OSError:
-                link_bytes = None
-        if link_bytes is not None:
-            return _symlink_row(path, "  ", link_bytes, max_size)
-    return _regular_blob_row(path, "  ", streamed, entry)
-    if not _is_symlink_entry(entry) and not _is_regular_entry(entry):
-        return BaselineFileRow(
-            path=path,
-            status="  ",
-            sha256=None,
-            size=None,
-            is_binary=None,
-            content=None,
-        )
-    return _stream_git_blob_to_row(
-        root, head, path, "  ", max_size, deadline, tick, budget
+        if not streamed_raw.is_binary and streamed_raw.size <= max_size:
+            return _symlink_row(path, "  ", bytes(streamed_raw.data), max_size)
+    streamed = _snapshot_row_from_raw(
+        path, "  ", streamed_raw, None, max_size, deadline, tick
     )
+    return _regular_blob_row(path, "  ", streamed, entry)
 
 
 def _cat_index_blob(
@@ -1120,16 +1045,43 @@ def _worktree_gitlink_oid(
 def _gitlink_row_from_index(
     path: str, status: str, entry: _IndexEntry
 ) -> BaselineFileRow:
-    return BaselineFileRow(
-        path=path,
-        status=status,
-        sha256=None,
-        size=None,
-        is_binary=None,
-        content=None,
-        mode=entry.mode,
-        gitlink_oid=entry.oid,
+    return evidence_content.gitlink_row(
+        path, status, mode=entry.mode, oid=entry.oid
     )
+
+
+_SOURCE_HEAD = "head"
+_SOURCE_STAGED_INDEX = "staged_index"
+_SOURCE_WORKTREE_UNTRACKED = "worktree_untracked"
+_SOURCE_WORKTREE_DIRTY = "worktree_dirty"
+
+
+def _select_final_source(xy: str | None) -> str:
+    """Classify which Git observation answers one final path.
+
+    Pure choice of WHERE the effective worktree content comes from;
+    reading (Git/subprocess/worktree hash under budget) and evidence
+    construction happen downstream:
+
+    - ``head``: clean status (``xy`` None); HEAD ``ls-tree`` is
+      authoritative for mode/OID and blob bytes stream via
+      ``git show``.
+    - ``staged_index``: staged-only (``Y == ' '``); the worktree
+      matches the index, so the live index map is authoritative for
+      mode/OID while content still hashes the worktree file.
+    - ``worktree_untracked``: untracked; worktree lstat/hash is
+      authoritative and regular files have no Git mode yet (``None``).
+    - ``worktree_dirty``: any ``Y`` divergence; worktree content AND
+      worktree mode (via ``git diff --raw``) are authoritative, never
+      the index.
+    """
+    if xy is None:
+        return _SOURCE_HEAD
+    if xy == "??" or xy[0] == "?":
+        return _SOURCE_WORKTREE_UNTRACKED
+    if xy[1] == " ":
+        return _SOURCE_STAGED_INDEX
+    return _SOURCE_WORKTREE_DIRTY
 
 
 def _resolve_final(
@@ -1170,6 +1122,7 @@ def _resolve_final(
         raise FinalizationError("UNSUPPORTED_FINAL_PATH") from None
     if xy is not None and (xy in ("D ", " D") or xy[1] == "D"):
         return None, None
+    source = _select_final_source(xy)
     if xy is None:
         if final_entry is None or final_entry.kind == "tree":
             return None, None
@@ -1178,49 +1131,31 @@ def _resolve_final(
                 REASON_GITLINK
             )
         if _is_symlink_entry(final_entry):
-            row = _stream_git_blob_to_row(
-                root,
-                final_head,
-                path,
-                _CLEAN_FINAL_STATUS,
-                max_size,
-                deadline,
-                tick,
-                budget,
+            raw_hashed = _stream_git_blob_raw(
+                root, final_head, path, max_size, deadline, tick, budget
             )
-            link_bytes: bytes | None = None
-            if row.content is not None:
-                try:
-                    link_bytes = gzip.decompress(bytes(row.content))
-                except OSError:
-                    link_bytes = None
-            if link_bytes is not None:
+            if not raw_hashed.is_binary and raw_hashed.size <= max_size:
                 row = _symlink_row(
-                    path, _CLEAN_FINAL_STATUS, link_bytes, max_size
+                    path,
+                    _CLEAN_FINAL_STATUS,
+                    bytes(raw_hashed.data),
+                    max_size,
                 )
             else:
-                row = BaselineFileRow(
-                    path=row.path,
-                    status=_CLEAN_FINAL_STATUS,
-                    sha256=row.sha256,
-                    size=row.size,
-                    is_binary=row.is_binary,
-                    content=row.content,
-                    mode=final_entry.mode,
-                    gitlink_oid=None,
+                row = _snapshot_row_from_raw(
+                    path,
+                    _CLEAN_FINAL_STATUS,
+                    raw_hashed,
+                    final_entry.mode,
+                    max_size,
+                    deadline,
+                    tick,
                 )
             return row, REASON_SYMLINK
         if not _is_regular_entry(final_entry):
             return (
-                BaselineFileRow(
-                    path=path,
-                    status=_CLEAN_FINAL_STATUS,
-                    sha256=None,
-                    size=None,
-                    is_binary=None,
-                    content=None,
-                    mode=final_entry.mode,
-                    gitlink_oid=None,
+                evidence_content.structural_row(
+                    path, _CLEAN_FINAL_STATUS, mode=final_entry.mode
                 ),
                 REASON_SPECIAL_FILE,
             )
@@ -1237,8 +1172,8 @@ def _resolve_final(
         return _regular_blob_row(
             path, _CLEAN_FINAL_STATUS, row, final_entry
         ), (None)
-    x, y = xy[0], xy[1]
-    if xy == "??" or x == "?":
+    x = xy[0]
+    if source == _SOURCE_WORKTREE_UNTRACKED:
         kind = _worktree_kind(root, path, xy, final_entry)
         if kind == "symlink":
             link_bytes = _readlink_bytes(root / path)
@@ -1259,16 +1194,7 @@ def _resolve_final(
                     REASON_GITLINK,
                 )
             return (
-                BaselineFileRow(
-                    path=path,
-                    status=xy,
-                    sha256=None,
-                    size=None,
-                    is_binary=None,
-                    content=None,
-                    mode=None,
-                    gitlink_oid=None,
-                ),
+                evidence_content.structural_row(path, xy, mode=None),
                 REASON_SPECIAL_FILE,
             )
         file_started_at = tick()
@@ -1295,8 +1221,7 @@ def _resolve_final(
                 gitlink_oid=None,
             )
         return row, None
-    worktree_dirt = y != " "
-    if not worktree_dirt:
+    if source == _SOURCE_STAGED_INDEX:
         # Staged-only: index authoritative for mode/OID.
         if index_entry is None:
             if x == "D":
@@ -1352,16 +1277,7 @@ def _resolve_final(
             )
             return row, None
         return (
-            BaselineFileRow(
-                path=path,
-                status=xy,
-                sha256=None,
-                size=None,
-                is_binary=None,
-                content=None,
-                mode=index_entry.mode,
-                gitlink_oid=None,
-            ),
+            evidence_content.structural_row(path, xy, mode=index_entry.mode),
             REASON_SPECIAL_FILE,
         )
     # Any Y == 'D' (including `AD`/`MD` staged structural): worktree
@@ -1393,13 +1309,9 @@ def _resolve_final(
             return _gitlink_row(path, xy, row_entry), REASON_GITLINK
         reason = REASON_GITLINK if kind == "gitlink" else REASON_SPECIAL_FILE
         return (
-            BaselineFileRow(
-                path=path,
-                status=xy,
-                sha256=None,
-                size=None,
-                is_binary=None,
-                content=None,
+            evidence_content.structural_row(
+                path,
+                xy,
                 mode=(
                     index_entry.mode
                     if index_entry is not None
@@ -1515,17 +1427,22 @@ def _hash_worktree_file(
     )
 
 
-def _stream_git_blob_to_row(
+def _stream_git_blob_raw(
     root: Path,
     head: str,
     path: str,
-    status: str,
     max_size: int,
     deadline: float,
     tick: Callable[[], float],
     budget: HashBudget,
-) -> BaselineFileRow:
+) -> HashedContent:
     """Stream one ``git show`` blob without buffering it fully.
+
+    Returns the raw hash result whose ``data`` holds RAW retained bytes
+    (at most ``max_size + 1``), never snapshot payload: callers convert
+    via ``evidence_content.snapshot_bytes_for_raw`` or reuse the bytes
+    directly for symlink targets. Never pass ``data`` to a
+    decompressor.
 
     Spawns ``git show`` with piped stdout and hashes chunks
     incrementally under the absolute deadline and aggregate hash
@@ -1622,19 +1539,7 @@ def _stream_git_blob_to_row(
         if returncode != 0:
             raise FinalizationError("BASELINE_OBJECT_UNAVAILABLE")
         budget.commit(wait_now - file_started_at)
-        saved = None
-        if not hashed.is_binary and hashed.size <= max_size:
-            saved = gzip.compress(bytes(hashed.data))
-        if tick() >= deadline:
-            raise FinalizationError("FINAL_SNAPSHOT_TIMEOUT")
-        return BaselineFileRow(
-            path=path,
-            status=status,
-            sha256=hashed.sha256,
-            size=hashed.size,
-            is_binary=hashed.is_binary,
-            content=saved,
-        )
+        return hashed
     finally:
         try:
             if proc.poll() is None:
@@ -1651,6 +1556,64 @@ def _stream_git_blob_to_row(
                 close()
         except OSError:
             pass
+
+
+def _snapshot_row_from_raw(
+    path: str,
+    status: str,
+    raw_hashed: HashedContent,
+    mode: str | None,
+    max_size: int,
+    deadline: float,
+    tick: Callable[[], float],
+) -> BaselineFileRow:
+    """Build a snapshot row from a RAW stream hash result.
+
+    Sole RAW-to-snapshot compression point for streamed Git blobs
+    (binary/size policy in ``evidence_content``). ``mode`` stays
+    explicit so HEAD/index authority is chosen by the caller.
+    """
+    saved = evidence_content.snapshot_bytes_for_raw(
+        raw=bytes(raw_hashed.data),
+        is_binary=raw_hashed.is_binary,
+        size=raw_hashed.size,
+        max_size=max_size,
+    )
+    if tick() >= deadline:
+        raise FinalizationError("FINAL_SNAPSHOT_TIMEOUT")
+    return evidence_content.regular_blob_row(
+        path,
+        status,
+        sha256=raw_hashed.sha256,
+        size=raw_hashed.size,
+        is_binary=raw_hashed.is_binary,
+        content=saved,
+        mode=mode,
+    )
+
+
+def _stream_git_blob_to_row(
+    root: Path,
+    head: str,
+    path: str,
+    status: str,
+    max_size: int,
+    deadline: float,
+    tick: Callable[[], float],
+    budget: HashBudget,
+) -> BaselineFileRow:
+    """Stream one ``git show`` blob into a modeless snapshot row.
+
+    Thin wrapper over :func:`_stream_git_blob_raw`; structural modes
+    are attached by the caller (``_regular_blob_row``) so this helper
+    never decides HEAD/index authority. Preserved for compatibility.
+    """
+    raw_hashed = _stream_git_blob_raw(
+        root, head, path, max_size, deadline, tick, budget
+    )
+    return _snapshot_row_from_raw(
+        path, status, raw_hashed, None, max_size, deadline, tick
+    )
 
 
 def _same_file(
