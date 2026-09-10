@@ -1,0 +1,35 @@
+.cru-detail-head-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.cru-failure {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(242, 109, 109, 0.45);
+  border-radius: var(--cru-radius);
+  background: rgba(242, 109, 109, 0.08);
+}
+
+.cru-detail-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.cru-detail-main,
+.cru-detail-side {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+@media (max-width: 900px) {
+  .cru-detail-grid {
+    grid-template-columns: 1fr;
+  }
+}

@@ -1,0 +1,67 @@
+<div class="cru-page">
+  <nav aria-label="Breadcrumb">
+    <a routerLink="/tasks" class="cru-muted">← Tasks</a>
+  </nav>
+
+  @if (loading()) {
+    <div class="cru-card" role="status" aria-label="Loading task detail">
+      <div class="cru-skeleton">&nbsp;</div>
+      <div class="cru-skeleton" style="margin-top: 8px">&nbsp;</div>
+      <div class="cru-skeleton" style="margin-top: 8px">&nbsp;</div>
+    </div>
+  } @else if (error() && task() === null) {
+    @if (isNotFound()) {
+      <cru-empty-state
+        title="Task not found"
+        hint="The requested task ID is not recorded in Core."
+      />
+    } @else {
+      <cru-error-state [error]="error()!" (retry)="refresh()" />
+    }
+  } @else if (task(); as t) {
+    <header class="cru-card cru-detail-head">
+      <div class="cru-detail-head-row">
+        <cru-task-status-badge [status]="t.status" />
+        <code class="cru-mono">{{ t.id }}</code>
+      </div>
+      @if (t.failure_code || t.failure_message) {
+        <div class="cru-failure" role="alert">
+          <strong>Failure</strong>
+          <p style="margin: 4px 0 0">
+            @if (t.failure_code) {
+              <span class="cru-mono">{{ t.failure_code }}</span>
+            }
+            @if (t.failure_message) {
+              <span> — {{ t.failure_message }}</span>
+            }
+          </p>
+        </div>
+      }
+      <dl class="cru-kv" style="margin-top: 10px">
+        <dt>Started</dt>
+        <dd>{{ t.started_at }}</dd>
+        <dt>Worktree</dt>
+        <dd>
+          <code class="cru-mono">{{ t.worktree }}</code>
+        </dd>
+        <dt>Branch</dt>
+        <dd>{{ t.branch ?? 'Not recorded' }}</dd>
+        <dt>Project</dt>
+        <dd>
+          <code class="cru-mono">{{ t.project_id }}</code>
+        </dd>
+      </dl>
+    </header>
+
+    <div class="cru-detail-grid">
+      <div class="cru-detail-main">
+        <cru-evidence-summary [task]="t" />
+      </div>
+      <div class="cru-detail-side">
+        <cru-file-change-list [changes]="t.file_changes" />
+      </div>
+    </div>
+
+    <cru-diff-viewer [state]="diff()" (load)="loadDiff()" (retry)="loadDiff()" />
+  }
+</div>

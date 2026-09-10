@@ -1,0 +1,24 @@
+<section class="cru-card" aria-label="Changed files">
+  <h2 class="cru-section-title">Changed files ({{ changes().length }})</h2>
+  @if (changes().length === 0) {
+    <p class="cru-muted" style="margin: 0">No file evidence recorded.</p>
+  } @else {
+    <ul class="cru-file-list">
+      @for (file of changes(); track file.path) {
+        <li class="cru-file">
+          <code class="cru-mono cru-file-path">{{ file.path }}</code>
+          <dl class="cru-kv">
+            <dt>Evidence</dt>
+            <dd>{{ file.evidence_status }}</dd>
+            <dt>Reason</dt>
+            <dd>{{ file.evidence_reason ?? 'Unavailable' }}</dd>
+            <dt>Final status</dt>
+            <dd>{{ file.final_status }}</dd>
+            <dt>Size</dt>
+            <dd>{{ file.final_size ?? 'Unavailable' }}</dd>
+          </dl>
+        </li>
+      }
+    </ul>
+  }
+</section>

@@ -1,0 +1,28 @@
+.cru-row {
+  display: block;
+  padding: 12px 14px;
+  border: 1px solid transparent;
+  border-bottom-color: var(--cru-border);
+  color: inherit;
+}
+
+.cru-row:hover {
+  text-decoration: none;
+  background: var(--cru-bg-raised);
+}
+
+.cru-row:last-child {
+  border-bottom-color: transparent;
+}
+
+.cru-row-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+.cru-row-id {
+  color: var(--cru-accent-cyan);
+}

@@ -1,0 +1,287 @@
+/* Crucible design system — 'Mesa de investigação'.
+ * Dark, minimalist operating surface. Tokens live here; components consume
+ * them. System sans for UI, monospace only for hashes/IDs/paths/diff. */
+
+:root {
+  --cru-bg: #0c0e12;
+  --cru-bg-raised: #12151c;
+  --cru-surface: #171b24;
+  --cru-surface-2: #1d222d;
+  --cru-border: #262c39;
+  --cru-border-strong: #333b4d;
+  --cru-text: #e6e9f0;
+  --cru-text-dim: #a7afc0;
+  --cru-text-faint: #6b7385;
+  --cru-accent: #6d7cff;
+  --cru-accent-soft: rgba(109, 124, 255, 0.14);
+  --cru-accent-cyan: #58c7e8;
+  --cru-ok: #3ecf8e;
+  --cru-warn: #e5b567;
+  --cru-bad: #f26d6d;
+  --cru-info: #7aa2f7;
+  --cru-focus: #9aa5ff;
+  --cru-radius: 8px;
+  --cru-font-ui: -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Roboto,
+    'Helvetica Neue', Arial, sans-serif;
+  --cru-font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas,
+    'Liberation Mono', monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--cru-bg);
+  color: var(--cru-text);
+  font-family: var(--cru-font-ui);
+  font-size: 14px;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: var(--cru-accent-cyan);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+:focus-visible {
+  outline: 2px solid var(--cru-focus);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.cru-mono {
+  font-family: var(--cru-font-mono);
+  font-size: 0.86em;
+  font-variant-numeric: tabular-nums;
+  word-break: break-all;
+}
+
+.cru-page {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  max-width: 1180px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+.cru-card {
+  background: var(--cru-surface);
+  border: 1px solid var(--cru-border);
+  border-radius: var(--cru-radius);
+  padding: 14px 16px;
+}
+
+.cru-card + .cru-card {
+  margin-top: 0;
+}
+
+.cru-section-title {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--cru-text-dim);
+}
+
+.cru-muted {
+  color: var(--cru-text-dim);
+}
+
+.cru-faint {
+  color: var(--cru-text-faint);
+}
+
+.cru-divider {
+  border: 0;
+  border-top: 1px solid var(--cru-border);
+  margin: 12px 0;
+}
+
+.cru-btn {
+  appearance: none;
+  border: 1px solid var(--cru-border-strong);
+  background: var(--cru-surface-2);
+  color: var(--cru-text);
+  border-radius: 6px;
+  padding: 8px 14px;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.cru-btn:hover:not(:disabled) {
+  border-color: var(--cru-accent);
+}
+
+.cru-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.cru-btn-primary {
+  background: var(--cru-accent);
+  border-color: var(--cru-accent);
+  color: #0b0d13;
+}
+
+.cru-btn-primary:hover:not(:disabled) {
+  border-color: var(--cru-accent-cyan);
+  filter: brightness(1.06);
+}
+
+.cru-state {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 28px 20px;
+  text-align: left;
+}
+
+.cru-state-center {
+  align-items: center;
+  text-align: center;
+}
+
+.cru-error-text {
+  color: var(--cru-bad);
+}
+
+.cru-kv {
+  display: grid;
+  grid-template-columns: minmax(140px, 220px) 1fr;
+  gap: 4px 12px;
+  margin: 0;
+}
+
+.cru-kv dt {
+  color: var(--cru-text-faint);
+  font-size: 12.5px;
+}
+
+.cru-kv dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.cru-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--cru-border-strong);
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.cru-badge::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--cru-text-faint);
+}
+
+.cru-badge[data-tone='ok'] {
+  color: var(--cru-ok);
+  border-color: rgba(62, 207, 142, 0.45);
+}
+
+.cru-badge[data-tone='ok']::before {
+  background: var(--cru-ok);
+}
+
+.cru-badge[data-tone='bad'] {
+  color: var(--cru-bad);
+  border-color: rgba(242, 109, 109, 0.45);
+}
+
+.cru-badge[data-tone='bad']::before {
+  background: var(--cru-bad);
+}
+
+.cru-badge[data-tone='warn'] {
+  color: var(--cru-warn);
+  border-color: rgba(229, 181, 103, 0.45);
+}
+
+.cru-badge[data-tone='warn']::before {
+  background: var(--cru-warn);
+}
+
+.cru-badge[data-tone='info'] {
+  color: var(--cru-info);
+  border-color: rgba(122, 162, 247, 0.45);
+}
+
+.cru-badge[data-tone='info']::before {
+  background: var(--cru-info);
+}
+
+.cru-skeleton {
+  border-radius: 6px;
+  background: linear-gradient(
+    90deg,
+    var(--cru-surface-2) 25%,
+    var(--cru-border) 50%,
+    var(--cru-surface-2) 75%
+  );
+  background-size: 200% 100%;
+  animation: cru-shimmer 1.2s infinite linear;
+  min-height: 14px;
+}
+
+@keyframes cru-shimmer {
+  to {
+    background-position: -200% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cru-skeleton {
+    animation: none;
+  }
+}
+
+.cru-diff {
+  background: var(--cru-bg-raised);
+  border: 1px solid var(--cru-border);
+  border-radius: var(--cru-radius);
+  padding: 12px;
+  max-height: 480px;
+  overflow: auto;
+  font-family: var(--cru-font-mono);
+  font-size: 12.5px;
+  line-height: 1.6;
+  white-space: pre;
+  margin: 0;
+}
+
+@media (max-width: 760px) {
+  .cru-page {
+    padding: 12px;
+  }
+
+  .cru-kv {
+    grid-template-columns: 1fr;
+  }
+}

@@ -1,0 +1,20 @@
+<a class="cru-row" [routerLink]="['/tasks', task().id]">
+  <div class="cru-row-head">
+    <cru-task-status-badge [status]="task().status" />
+    <code class="cru-mono cru-row-id">{{ task().id }}</code>
+  </div>
+  <dl class="cru-kv">
+    <dt>Started</dt>
+    <dd>{{ task().started_at }}</dd>
+    <dt>Branch</dt>
+    <dd>{{ task().branch ?? 'Not recorded' }}</dd>
+    <dt>Failure</dt>
+    <dd>
+      @if (task().failure_code) {
+        <span class="cru-error-text">{{ task().failure_code }}</span>
+      } @else {
+        <span class="cru-faint">—</span>
+      }
+    </dd>
+  </dl>
+</a>

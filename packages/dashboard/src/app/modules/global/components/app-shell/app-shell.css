@@ -1,0 +1,74 @@
+.cru-shell-bar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: rgba(12, 14, 18, 0.92);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--cru-border);
+}
+
+.cru-shell-inner {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 10px 16px;
+}
+
+.cru-brand {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  color: var(--cru-text);
+}
+
+.cru-brand:hover {
+  text-decoration: none;
+}
+
+.cru-brand-mark {
+  align-self: center;
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  background: linear-gradient(135deg, var(--cru-accent), var(--cru-accent-cyan));
+}
+
+.cru-brand-name {
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.cru-brand-sub {
+  color: var(--cru-text-faint);
+  font-size: 12px;
+}
+
+.cru-nav {
+  display: flex;
+  gap: 4px;
+}
+
+.cru-nav a {
+  color: var(--cru-text-dim);
+  font-weight: 600;
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+}
+
+.cru-nav a:hover {
+  color: var(--cru-text);
+  text-decoration: none;
+}
+
+.cru-nav-active {
+  color: var(--cru-text) !important;
+  background: var(--cru-accent-soft);
+  border-color: rgba(109, 124, 255, 0.4) !important;
+}
+
+.cru-shell-main {
+  min-height: calc(100dvh - 53px);
+}

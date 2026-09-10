@@ -1,0 +1,20 @@
+<header class="cru-shell-bar">
+  <div class="cru-shell-inner">
+    <a class="cru-brand" routerLink="/tasks">
+      <span class="cru-brand-mark" aria-hidden="true"></span>
+      <span class="cru-brand-name">Crucible</span>
+      <span class="cru-brand-sub">local provenance</span>
+    </a>
+    <nav class="cru-nav" aria-label="Primary">
+      <a
+        routerLink="/tasks"
+        routerLinkActive="cru-nav-active"
+        [routerLinkActiveOptions]="{ exact: false }"
+        >Tasks</a
+      >
+    </nav>
+  </div>
+</header>
+<main class="cru-shell-main">
+  <ng-content />
+</main>

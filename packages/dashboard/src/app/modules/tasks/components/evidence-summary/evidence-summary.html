@@ -1,0 +1,128 @@
+@let t = task();
+<section class="cru-card" aria-label="Inputs">
+  <h2 class="cru-section-title">Inputs</h2>
+  @if (t.input_ids.length > 0) {
+    <ul class="cru-id-list">
+      @for (id of t.input_ids; track id) {
+        <li><code class="cru-mono">{{ id }}</code></li>
+      }
+    </ul>
+  } @else {
+    <p class="cru-muted" style="margin: 0">Not recorded</p>
+  }
+</section>
+
+<section class="cru-card" aria-label="Evidence">
+  <h2 class="cru-section-title">Evidence</h2>
+  <dl class="cru-kv">
+    <dt>Completeness</dt>
+    <dd>{{ t.evidence_completeness ?? 'Unavailable' }}</dd>
+    <dt>Snapshot frozen</dt>
+    <dd>{{ t.snapshot_frozen_at ?? 'Not recorded' }}</dd>
+    <dt>Baseline head</dt>
+    <dd>
+      @if (t.baseline_head) {
+        <code class="cru-mono">{{ t.baseline_head }}</code>
+      } @else {
+        Unavailable
+      }
+    </dd>
+    <dt>Baseline status</dt>
+    <dd>{{ t.baseline_status ?? 'Not recorded' }}</dd>
+    <dt>Final head</dt>
+    <dd>
+      @if (t.final_head) {
+        <code class="cru-mono">{{ t.final_head }}</code>
+      } @else {
+        Unavailable
+      }
+    </dd>
+    <dt>Final status</dt>
+    <dd>{{ t.final_status ?? 'Not recorded' }}</dd>
+    <dt>Terminal outcome</dt>
+    <dd>{{ t.terminal_outcome ?? 'Not recorded' }}</dd>
+    <dt>Execution</dt>
+    <dd>
+      @if (t.execution_id) {
+        <code class="cru-mono">{{ t.execution_id }}</code>
+      } @else {
+        Not recorded
+      }
+    </dd>
+  </dl>
+</section>
+
+<section class="cru-card" aria-label="Index manifests">
+  <h2 class="cru-section-title">Index manifests</h2>
+  <dl class="cru-kv">
+    <dt>Baseline index SHA-256</dt>
+    <dd>
+      @if (t.baseline_index_sha256) {
+        <code class="cru-mono">{{ t.baseline_index_sha256 }}</code>
+      } @else {
+        Unavailable
+      }
+    </dd>
+    <dt>Final index SHA-256</dt>
+    <dd>
+      @if (t.final_index_sha256) {
+        <code class="cru-mono">{{ t.final_index_sha256 }}</code>
+      } @else {
+        Unavailable
+      }
+    </dd>
+  </dl>
+  <details class="cru-manifest">
+    <summary>Baseline index manifest</summary>
+    @if (t.baseline_index_manifest) {
+      <pre
+        class="cru-diff"
+        tabindex="0"
+        aria-label="Baseline index manifest, plain text"
+      >{{ t.baseline_index_manifest }}</pre>
+    } @else {
+      <p class="cru-muted" style="margin: 8px 0 0">Unavailable</p>
+    }
+  </details>
+  <details class="cru-manifest">
+    <summary>Final index manifest</summary>
+    @if (t.final_index_manifest) {
+      <pre
+        class="cru-diff"
+        tabindex="0"
+        aria-label="Final index manifest, plain text"
+      >{{ t.final_index_manifest }}</pre>
+    } @else {
+      <p class="cru-muted" style="margin: 8px 0 0">Unavailable</p>
+    }
+  </details>
+</section>
+
+<section class="cru-card" aria-label="Baseline files">
+  <h2 class="cru-section-title">Baseline files ({{ t.baseline_files.length }})</h2>
+  @if (t.baseline_files.length === 0) {
+    <p class="cru-muted" style="margin: 0">Not recorded</p>
+  } @else {
+    <ul class="cru-baseline-list">
+      @for (file of t.baseline_files; track file.path) {
+        <li class="cru-baseline-file">
+          <code class="cru-mono">{{ file.path }}</code>
+          <dl class="cru-kv">
+            <dt>Status</dt>
+            <dd>{{ file.status }}</dd>
+            <dt>Size</dt>
+            <dd>{{ file.size ?? 'Unavailable' }}</dd>
+            <dt>SHA-256</dt>
+            <dd>
+              @if (file.sha256) {
+                <code class="cru-mono">{{ file.sha256 }}</code>
+              } @else {
+                Unavailable
+              }
+            </dd>
+          </dl>
+        </li>
+      }
+    </ul>
+  }
+</section>

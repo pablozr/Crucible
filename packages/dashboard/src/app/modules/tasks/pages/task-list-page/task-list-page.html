@@ -1,0 +1,55 @@
+<div class="cru-page">
+  <div class="cru-list-head">
+    <div>
+      <h1 class="cru-title">Tasks</h1>
+      <p class="cru-muted" style="margin: 0">
+        Read-only local provenance. Heavy evidence stays on the detail view.
+      </p>
+    </div>
+  </div>
+
+  @if (loading()) {
+    <div class="cru-card" role="status" aria-label="Loading tasks">
+      <div class="cru-skeleton">&nbsp;</div>
+      <div class="cru-skeleton" style="margin-top: 8px">&nbsp;</div>
+      <div class="cru-skeleton" style="margin-top: 8px">&nbsp;</div>
+    </div>
+  } @else if (tasks().length === 0 && !error()) {
+    <cru-empty-state
+      title="No tasks recorded"
+      hint="Run the agent pipeline locally to capture the first task."
+    />
+  } @else {
+    <div class="cru-card cru-list-card" role="list" aria-label="Tasks">
+      @for (task of tasks(); track task.id) {
+        <div role="listitem">
+          <cru-task-list-item [task]="task" />
+        </div>
+      }
+    </div>
+
+    @if (nextCursor() !== null) {
+      <div class="cru-more">
+        <button
+          type="button"
+          class="cru-btn"
+          (click)="loadMore()"
+          [disabled]="loadingMore()"
+        >
+          {{ loadingMore() ? 'Loading…' : 'Load more' }}
+        </button>
+      </div>
+    }
+
+    @if (error()) {
+      <cru-error-state
+        [error]="error()!"
+        (retry)="tasks().length > 0 && nextCursor() !== null ? loadMore() : refresh()"
+      />
+    }
+  }
+
+  @if (!loading() && tasks().length === 0 && error()) {
+    <cru-error-state [error]="error()!" (retry)="refresh()" />
+  }
+</div>

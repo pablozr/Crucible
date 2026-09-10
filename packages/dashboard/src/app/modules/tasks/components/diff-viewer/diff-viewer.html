@@ -1,0 +1,39 @@
+@let s = state();
+<section class="cru-card" aria-label="Task diff">
+  <h2 class="cru-section-title">Task diff</h2>
+  @switch (s.kind) {
+    @case ('closed') {
+      <p class="cru-muted" style="margin: 0 0 10px">
+        The stored diff is hidden until requested.
+      </p>
+      <button type="button" class="cru-btn cru-btn-primary" (click)="load.emit()">
+        Load diff
+      </button>
+    }
+    @case ('loading') {
+      <div class="cru-skeleton" role="status" aria-label="Loading diff">
+        &nbsp;
+      </div>
+    }
+    @case ('ready') {
+      @if (s.diff) {
+        <pre
+          class="cru-diff"
+          tabindex="0"
+          aria-label="Task diff, plain text"
+        >{{ s.diff }}</pre>
+      } @else {
+        <p class="cru-muted" style="margin: 0">No diff recorded for this task.</p>
+      }
+    }
+    @case ('error') {
+      <div role="alert">
+        <p class="cru-error-text" style="margin: 0 0 10px">
+          <span class="cru-mono">{{ s.error.code }}</span>
+          <span aria-hidden="true"> · </span>{{ s.error.message }}
+        </p>
+        <button type="button" class="cru-btn" (click)="retry.emit()">Retry</button>
+      </div>
+    }
+  }
+</section>

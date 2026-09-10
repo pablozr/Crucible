@@ -1,0 +1,23 @@
+.cru-list-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.cru-title {
+  margin: 0;
+  font-size: 20px;
+  letter-spacing: -0.01em;
+}
+
+.cru-list-card {
+  padding: 4px 0;
+}
+
+.cru-more {
+  display: flex;
+  justify-content: center;
+  padding: 4px 0 8px;
+}

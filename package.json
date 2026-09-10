@@ -3,9 +3,10 @@
   "private": true,
   "packageManager": "pnpm@10.33.2",
   "scripts": {
-    "build": "pnpm --filter @crucible/cli --filter @crucible/adapters build",
-    "test": "pnpm --filter @crucible/cli --filter @crucible/adapters test",
-    "typecheck": "pnpm --filter @crucible/cli --filter @crucible/adapters typecheck"
+    "build": "pnpm --filter @crucible/cli --filter @crucible/adapters --filter @crucible/dashboard build",
+    "test": "pnpm --filter @crucible/cli --filter @crucible/adapters --filter @crucible/dashboard test",
+    "typecheck": "pnpm --filter @crucible/cli --filter @crucible/adapters --filter @crucible/dashboard typecheck",
+    "dev:dashboard": "pnpm --filter @crucible/dashboard dev"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

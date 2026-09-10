@@ -1,0 +1,59 @@
+.cru-id-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.cru-manifest {
+  margin-top: 10px;
+  border-top: 1px solid var(--cru-border);
+  padding-top: 10px;
+}
+
+.cru-manifest summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--cru-text-dim);
+  border-radius: 4px;
+}
+
+.cru-manifest summary:hover {
+  color: var(--cru-text);
+}
+
+.cru-manifest .cru-diff {
+  margin-top: 8px;
+  max-height: 320px;
+}
+
+.cru-baseline-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.cru-baseline-file {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--cru-border);
+}
+
+.cru-baseline-file:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+.cru-baseline-file:first-child {
+  padding-top: 0;
+}
+
+.cru-baseline-file > .cru-mono {
+  display: inline-block;
+  margin-bottom: 6px;
+  color: var(--cru-text);
+}

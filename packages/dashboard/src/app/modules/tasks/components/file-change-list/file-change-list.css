@@ -1,0 +1,36 @@
+.cru-file-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.cru-file {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--cru-border);
+}
+
+.cru-file:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+.cru-file:first-child {
+  padding-top: 0;
+}
+
+.cru-file-path {
+  display: inline-block;
+  margin-bottom: 6px;
+  color: var(--cru-text);
+}
+
+.cru-id-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}

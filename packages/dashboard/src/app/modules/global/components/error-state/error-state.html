@@ -1,0 +1,8 @@
+<div class="cru-state cru-card" role="alert">
+  <strong>Couldn’t load Core data</strong>
+  <p class="cru-muted" style="margin: 0">
+    <span class="cru-mono">{{ error().code }}</span>
+    <span aria-hidden="true"> · </span>{{ error().message }}
+  </p>
+  <button type="button" class="cru-btn" (click)="retry.emit()">Retry</button>
+</div>
