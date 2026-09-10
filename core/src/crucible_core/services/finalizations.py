@@ -2,53 +2,72 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Callable
 
 from crucible_core.application.finalizations import FinalizationCoordinator
-from crucible_core.infrastructure.git.final_capture import capture_final
+from crucible_core.infrastructure.git import final_capture_worker as worker
 from crucible_core.schemas.admissions import EventRequest
 
-_capture_final = capture_final
-_PUBLICATION_HOOK: Any = None
-_CLOCK: Callable[[], datetime] | None = None
-_MONOTONIC: Callable[[], float] | None = None
-_MAX_AUTHORIZATION_WINDOW_SECONDS: int | None = None
+
+def _resolve_runner(
+    capture_runner: worker.CaptureRunner | None,
+) -> worker.CaptureRunner:
+    # Production composition (routes/lifespan) always injects the
+    # shared runner explicitly; the default only covers direct calls.
+    return capture_runner or worker.get_default_runner()
 
 
 def complete_event(
     database_path: Path,
     event: EventRequest,
     max_authorization_window_seconds: int | None = None,
+    payload_hash: str | None = None,
+    capture_runner: worker.CaptureRunner | None = None,
+    *,
+    publication_hook: Callable[[], None] | None = None,
+    clock: Callable[[], datetime] | None = None,
+    monotonic: Callable[[], float] | None = None,
 ) -> dict[str, object]:
-    clock = _CLOCK or (lambda: datetime.now(UTC))
-    window = max_authorization_window_seconds
-    if window is None:
-        window = _MAX_AUTHORIZATION_WINDOW_SECONDS
+    resolved_clock = clock or (lambda: datetime.now(UTC))
     return FinalizationCoordinator(
         database_path,
-        capture_final=_capture_final,
-        publication_hook=_PUBLICATION_HOOK,
-        clock=clock,
-        max_authorization_window_seconds=window,
-        monotonic=_MONOTONIC,
-    ).complete(event)
+        capture_runner=_resolve_runner(capture_runner),
+        publication_hook=publication_hook,
+        clock=resolved_clock,
+        max_authorization_window_seconds=max_authorization_window_seconds,
+        monotonic=monotonic,
+    ).complete(event, payload_hash)
 
 
-def abort_event(database_path: Path, event: EventRequest) -> dict[str, object]:
+def abort_event(
+    database_path: Path,
+    event: EventRequest,
+    payload_hash: str | None = None,
+    capture_runner: worker.CaptureRunner | None = None,
+    *,
+    publication_hook: Callable[[], None] | None = None,
+) -> dict[str, object]:
     return FinalizationCoordinator(
         database_path,
-        capture_final=_capture_final,
-        publication_hook=_PUBLICATION_HOOK,
-    ).abort(event)
+        capture_runner=_resolve_runner(capture_runner),
+        publication_hook=publication_hook,
+    ).abort(event, payload_hash)
 
 
-def recover_finalizations(database_path: Path) -> None:
+def recover_finalizations(
+    database_path: Path,
+    capture_runner: worker.CaptureRunner | None = None,
+) -> None:
     FinalizationCoordinator(
-        database_path, capture_final=_capture_final
+        database_path, capture_runner=_resolve_runner(capture_runner)
     ).recover()
 
 
-def fence_unfrozen_finalization(database_path: Path, tree_id: str) -> int:
+def fence_unfrozen_finalization(
+    database_path: Path,
+    tree_id: str,
+    capture_runner: worker.CaptureRunner | None = None,
+) -> int:
     return FinalizationCoordinator(
-        database_path, capture_final=_capture_final
+        database_path, capture_runner=_resolve_runner(capture_runner)
     ).fence_unfrozen(tree_id)

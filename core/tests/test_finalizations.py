@@ -4,6 +4,7 @@ import gzip
 import json
 import sqlite3
 import subprocess
+import threading
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,7 +18,7 @@ from crucible_core.core.database import upgrade
 from crucible_core.core.errors import FinalizationError
 from crucible_core.infrastructure.git import final_capture_worker as worker
 from crucible_core.infrastructure.git.final_capture import capture_final
-from crucible_core.main import app
+from crucible_core.main import app, build_app
 from crucible_core.schemas.finalizations import FinalCaptureSnapshot
 
 TERMINAL_WINDOW_ENV = "CRUCIBLE_TERMINAL_MAX_AUTH_WINDOW_SECONDS"
@@ -117,6 +118,63 @@ def admit(client: TestClient, project_id: str, root: Path) -> str:
     response = client.post("/v1/events", json=candidate(project_id, root))
     assert response.status_code == 200, response.text
     return response.json()["data"]["event"]["task_id"]
+
+
+def _test_app(capture=None, **overrides):
+    """Build a per-test app with immutable composed dependencies."""
+    if capture is not None:
+        overrides.setdefault(
+            "capture_runner", worker.InlineCaptureRunner(capture)
+        )
+    return build_app(**overrides)
+
+
+class _FakeRunner(worker.CaptureRunner):
+    """Scripted fake runner injected via dependency override.
+
+    Spawn only delegates to the scripted behavior; wait runs outside
+    the boundary lock so fences can land concurrently.
+    """
+
+    def __init__(self, spawn, wait, snapshot_keys=None, cancel=None):
+        self._spawn = spawn
+        self._wait = wait
+        self._snapshot_keys = snapshot_keys
+        self._cancel = cancel
+        self._lock = threading.RLock()
+
+    @property
+    def boundary_lock(self):
+        return self._lock
+
+    def spawn_capture(self, request, tree_id, generation, task_id):
+        return self._spawn(request, tree_id, generation, task_id)
+
+    def wait_capture(self, key, deadline, monotonic=None):
+        return self._wait(key, deadline, monotonic)
+
+    def snapshot_tree_keys(self, tree_id):
+        if self._snapshot_keys is None:
+            return []
+        return self._snapshot_keys(tree_id)
+
+    def cancel_capture(self, key):
+        if self._cancel is None:
+            return False
+        return self._cancel(key)
+
+    def cancel_tree_captures(self, tree_id):
+        count = 0
+        for key in self.snapshot_tree_keys(tree_id):
+            try:
+                if self.cancel_capture(key):
+                    count += 1
+            except Exception:
+                continue
+        return count
+
+    def shutdown(self):
+        pass
 
 
 def test_completion_freezes_and_materializes_exact_task_diff(
@@ -221,21 +279,16 @@ def test_stale_generation_cannot_publish(monkeypatch, tmp_path):
             "SELECT working_tree_id FROM tasks WHERE id = ?", (task_id,)
         ).fetchone()[0]
         connection.close()
-        monkeypatch.setattr(
-            finalization_service,
-            "_PUBLICATION_HOOK",
-            lambda: finalization_service.fence_unfrozen_finalization(
-                database_path(tmp_path), tree_id
-            ),
+
+    def _fence_hook() -> None:
+        finalization_service.fence_unfrozen_finalization(
+            database_path(tmp_path), tree_id
         )
-        try:
-            response = client.post(
-                "/v1/events", json=completion(project_id, root, task_id)
-            )
-        finally:
-            monkeypatch.setattr(
-                finalization_service, "_PUBLICATION_HOOK", None
-            )
+
+    with TestClient(build_app(publication_hook=_fence_hook)) as client:
+        response = client.post(
+            "/v1/events", json=completion(project_id, root, task_id)
+        )
     assert response.status_code == 409
     assert response.json()["data"]["code"] == "STALE_CAPTURE_GENERATION"
     connection = sqlite3.connect(database_path(tmp_path))
@@ -352,7 +405,9 @@ def test_recovery_uses_only_frozen_sqlite_evidence(tmp_path):
     connection.commit()
     connection.close()
 
-    coordinator = FinalizationCoordinator(path, capture_final=capture_final)
+    coordinator = FinalizationCoordinator(
+        path, capture_runner=worker.InlineCaptureRunner(capture_final)
+    )
     coordinator.recover()
 
     connection = sqlite3.connect(path)
@@ -379,53 +434,49 @@ def test_real_admission_fences_finalizing_before_releasing_overlap(
     monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
     root = tmp_path / "repo"
     project_id = initialized_repository(root)
-    with TestClient(app) as client:
+    event_b = {
+        "event_id": str(uuid.uuid4()),
+        "event_type": "input_candidate",
+        "occurred_at": "2026-09-07T00:00:30Z",
+        "payload_version": 1,
+        "adapter": "opencode-v1",
+        "adapter_version": "0.1.0",
+        "agent_session_id": "session-2",
+        "input_id": "input-2",
+        "execution_id": "execution-2",
+        "project_id": project_id,
+        "git_root": str(root),
+        "workspace_path": str(root),
+        "payload": {"delivery": "new"},
+    }
+    captured: dict[str, object] = {}
+
+    def _hook() -> None:
+        # `client` binds below before any request runs; the closure
+        # resolves it at call time inside the completion request.
+        b_response = client.post("/v1/events", json=event_b)
+        captured["b_status"] = b_response.status_code
+        captured["b_body"] = b_response.json()
+        connection = sqlite3.connect(database_path(tmp_path))
+        try:
+            captured["a_during_b"] = connection.execute(
+                "SELECT status, failure_code, snapshot_frozen_at "
+                "FROM tasks WHERE id = ?",
+                (task_a,),
+            ).fetchone()
+            captured["event_during_b"] = connection.execute(
+                "SELECT status, failure_code FROM inbound_events "
+                "WHERE event_type = 'task_completed'",
+            ).fetchone()
+        finally:
+            connection.close()
+
+    test_app = build_app(publication_hook=_hook)
+    with TestClient(test_app) as client:
         task_a = admit(client, project_id, root)
         (root / "tracked.txt").write_text("after\n", encoding="utf-8")
-        event_b = {
-            "event_id": str(uuid.uuid4()),
-            "event_type": "input_candidate",
-            "occurred_at": "2026-09-07T00:00:30Z",
-            "payload_version": 1,
-            "adapter": "opencode-v1",
-            "adapter_version": "0.1.0",
-            "agent_session_id": "session-2",
-            "input_id": "input-2",
-            "execution_id": "execution-2",
-            "project_id": project_id,
-            "git_root": str(root),
-            "workspace_path": str(root),
-            "payload": {"delivery": "new"},
-        }
-        captured: dict[str, object] = {}
-
-        def _hook() -> None:
-            b_response = client.post("/v1/events", json=event_b)
-            captured["b_status"] = b_response.status_code
-            captured["b_body"] = b_response.json()
-            connection = sqlite3.connect(database_path(tmp_path))
-            try:
-                captured["a_during_b"] = connection.execute(
-                    "SELECT status, failure_code, snapshot_frozen_at "
-                    "FROM tasks WHERE id = ?",
-                    (task_a,),
-                ).fetchone()
-                captured["event_during_b"] = connection.execute(
-                    "SELECT status, failure_code FROM inbound_events "
-                    "WHERE event_type = 'task_completed'",
-                ).fetchone()
-            finally:
-                connection.close()
-
-        monkeypatch.setattr(finalization_service, "_PUBLICATION_HOOK", _hook)
-        try:
-            event_a = completion(project_id, root, task_a)
-            response = client.post("/v1/events", json=event_a)
-        finally:
-            monkeypatch.setattr(
-                finalization_service, "_PUBLICATION_HOOK", None
-            )
-
+        event_a = completion(project_id, root, task_a)
+        response = client.post("/v1/events", json=event_a)
         fenced_replay = client.post("/v1/events", json=event_a)
 
     assert captured["b_status"] == 200
@@ -470,7 +521,15 @@ def test_processing_replay_is_retryable_and_completed_stable(
     monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
     root = tmp_path / "repo"
     project_id = initialized_repository(root)
-    with TestClient(app) as client:
+    captured: dict[str, object] = {}
+
+    def _hook() -> None:
+        # `client` and `event` bind below before any request runs.
+        replay = client.post("/v1/events", json=event)
+        captured["status"] = replay.status_code
+        captured["body"] = replay.json()
+
+    with TestClient(build_app(publication_hook=_hook)) as client:
         admitted = client.post("/v1/events", json=candidate(project_id, root))
         assert admitted.status_code == 200, admitted.text
         task_id = admitted.json()["data"]["event"]["task_id"]
@@ -478,21 +537,7 @@ def test_processing_replay_is_retryable_and_completed_stable(
         assert input_row_id
         (root / "tracked.txt").write_text("after\n", encoding="utf-8")
         event = completion(project_id, root, task_id)
-        captured: dict[str, object] = {}
-
-        def _hook() -> None:
-            replay = client.post("/v1/events", json=event)
-            captured["status"] = replay.status_code
-            captured["body"] = replay.json()
-
-        monkeypatch.setattr(finalization_service, "_PUBLICATION_HOOK", _hook)
-        try:
-            first = client.post("/v1/events", json=event)
-        finally:
-            monkeypatch.setattr(
-                finalization_service, "_PUBLICATION_HOOK", None
-            )
-
+        first = client.post("/v1/events", json=event)
         second = client.post("/v1/events", json=event)
 
     assert captured["status"] == 409
@@ -519,14 +564,13 @@ def test_unexpected_capture_error_terminalizes_and_releases_tree(
     monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
     root = tmp_path / "repo"
     project_id = initialized_repository(root)
-    with TestClient(app) as client:
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("boom")
+
+    with TestClient(_test_app(_boom)) as client:
         task_a = admit(client, project_id, root)
         event = completion(project_id, root, task_a)
-
-        def _boom(*args: object, **kwargs: object) -> object:
-            raise RuntimeError("boom")
-
-        monkeypatch.setattr(finalization_service, "_capture_final", _boom)
         response = client.post("/v1/events", json=event)
 
     assert response.status_code == 500
@@ -565,15 +609,14 @@ def test_completion_execution_mismatch_before_capture(monkeypatch, tmp_path):
     monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
     root = tmp_path / "repo"
     project_id = initialized_repository(root)
-    with TestClient(app) as client:
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise AssertionError("capture must not run on mismatch")
+
+    with TestClient(_test_app(_boom)) as client:
         task_id = admit(client, project_id, root)
         event = completion(project_id, root, task_id)
         event["execution_id"] = "execution-other"
-
-        def _boom(*args: object, **kwargs: object) -> object:
-            raise AssertionError("capture must not run on mismatch")
-
-        monkeypatch.setattr(finalization_service, "_capture_final", _boom)
         response = client.post("/v1/events", json=event)
         detail = client.get(f"/v1/tasks/{task_id}").json()["data"]["task"]
     assert response.status_code == 409
@@ -586,15 +629,14 @@ def test_completion_session_mismatch_before_capture(monkeypatch, tmp_path):
     monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
     root = tmp_path / "repo"
     project_id = initialized_repository(root)
-    with TestClient(app) as client:
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise AssertionError("capture must not run on mismatch")
+
+    with TestClient(_test_app(_boom)) as client:
         task_id = admit(client, project_id, root)
         event = completion(project_id, root, task_id)
         event["agent_session_id"] = "session-other"
-
-        def _boom(*args: object, **kwargs: object) -> object:
-            raise AssertionError("capture must not run on mismatch")
-
-        monkeypatch.setattr(finalization_service, "_capture_final", _boom)
         response = client.post("/v1/events", json=event)
         detail = client.get(f"/v1/tasks/{task_id}").json()["data"]["task"]
     assert response.status_code == 409
@@ -619,7 +661,11 @@ def test_completion_requires_caller_capture_window(
     monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
     root = tmp_path / "repo"
     project_id = initialized_repository(root)
-    with TestClient(app) as client:
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise AssertionError("capture must not run on invalid window")
+
+    with TestClient(_test_app(_boom)) as client:
         task_id = admit(client, project_id, root)
         event = completion(project_id, root, task_id)
         payload = event["payload"]
@@ -636,11 +682,6 @@ def test_completion_requires_caller_capture_window(
         else:
             payload["terminal_observed_at"] = "2026-09-07T00:05:00Z"
             payload["capture_not_after"] = "2026-09-07T00:00:00Z"
-
-        def _boom(*args: object, **kwargs: object) -> object:
-            raise AssertionError("capture must not run on invalid window")
-
-        monkeypatch.setattr(finalization_service, "_capture_final", _boom)
         response = client.post("/v1/events", json=event)
         detail = client.get(f"/v1/tasks/{task_id}").json()["data"]["task"]
     assert response.json()["data"]["code"] == code
@@ -651,21 +692,19 @@ def test_expired_authorization_aborts_without_git_reads(monkeypatch, tmp_path):
     monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
     root = tmp_path / "repo"
     project_id = initialized_repository(root)
-    monkeypatch.setattr(
-        finalization_service,
-        "_CLOCK",
-        lambda: datetime(2026, 9, 7, 0, 1, 0, tzinfo=UTC),
-    )
-    with TestClient(app) as client:
+
+    def _fixed_clock() -> datetime:
+        return datetime(2026, 9, 7, 0, 1, 0, tzinfo=UTC)
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise AssertionError("expired capture must not read Git")
+
+    test_app = _test_app(_boom, clock=_fixed_clock)
+    with TestClient(test_app) as client:
         task_id = admit(client, project_id, root)
         event = completion(project_id, root, task_id)
         event["payload"]["terminal_observed_at"] = "2026-09-07T00:00:00Z"
         event["payload"]["capture_not_after"] = "2026-09-07T00:00:10Z"
-
-        def _boom(*args: object, **kwargs: object) -> object:
-            raise AssertionError("expired capture must not read Git")
-
-        monkeypatch.setattr(finalization_service, "_capture_final", _boom)
         response = client.post("/v1/events", json=event)
         detail = client.get(f"/v1/tasks/{task_id}").json()["data"]["task"]
         stored = client.get(f"/v1/events/{event['event_id']}").json()["data"][
@@ -700,12 +739,11 @@ def test_expired_abort_replay_is_stable(monkeypatch, tmp_path):
     monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
     root = tmp_path / "repo"
     project_id = initialized_repository(root)
-    monkeypatch.setattr(
-        finalization_service,
-        "_CLOCK",
-        lambda: datetime(2026, 9, 7, 0, 1, 0, tzinfo=UTC),
-    )
-    with TestClient(app) as client:
+
+    def _fixed_clock() -> datetime:
+        return datetime(2026, 9, 7, 0, 1, 0, tzinfo=UTC)
+
+    with TestClient(_test_app(clock=_fixed_clock)) as client:
         task_id = admit(client, project_id, root)
         event = completion(project_id, root, task_id)
         event["payload"]["terminal_observed_at"] = "2026-09-07T00:00:00Z"
@@ -733,24 +771,23 @@ def test_completed_replay_after_window_stays_completed(monkeypatch, tmp_path):
     monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
     root = tmp_path / "repo"
     project_id = initialized_repository(root)
-    with TestClient(app) as client:
+
+    def _first_clock() -> datetime:
+        return datetime(2026, 9, 7, 0, 0, 45, tzinfo=UTC)
+
+    def _later_clock() -> datetime:
+        return datetime(2026, 9, 7, 0, 2, 0, tzinfo=UTC)
+
+    with TestClient(_test_app(clock=_first_clock)) as client:
         task_id = admit(client, project_id, root)
         (root / "tracked.txt").write_text("after\n", encoding="utf-8")
         event = completion(project_id, root, task_id)
         event["payload"]["terminal_observed_at"] = "2026-09-07T00:00:30Z"
         event["payload"]["capture_not_after"] = "2026-09-07T00:01:00Z"
-        monkeypatch.setattr(
-            finalization_service,
-            "_CLOCK",
-            lambda: datetime(2026, 9, 7, 0, 0, 45, tzinfo=UTC),
-        )
         first = client.post("/v1/events", json=event)
         assert first.status_code == 200, first.text
-        monkeypatch.setattr(
-            finalization_service,
-            "_CLOCK",
-            lambda: datetime(2026, 9, 7, 0, 2, 0, tzinfo=UTC),
-        )
+    # A replay observes stored completion; each app keeps its own clock.
+    with TestClient(_test_app(clock=_later_clock)) as client:
         replay = client.post("/v1/events", json=event)
         detail = client.get(f"/v1/tasks/{task_id}").json()["data"]["task"]
     assert replay.json() == first.json()
@@ -761,12 +798,11 @@ def test_new_completion_after_expiry_cannot_renew(monkeypatch, tmp_path):
     monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
     root = tmp_path / "repo"
     project_id = initialized_repository(root)
-    monkeypatch.setattr(
-        finalization_service,
-        "_CLOCK",
-        lambda: datetime(2026, 9, 7, 0, 1, 0, tzinfo=UTC),
-    )
-    with TestClient(app) as client:
+
+    def _fixed_clock() -> datetime:
+        return datetime(2026, 9, 7, 0, 1, 0, tzinfo=UTC)
+
+    with TestClient(_test_app(clock=_fixed_clock)) as client:
         task_id = admit(client, project_id, root)
         expired = completion(project_id, root, task_id)
         expired["payload"]["terminal_observed_at"] = "2026-09-07T00:00:00Z"
@@ -795,30 +831,26 @@ def test_expired_completion_makes_no_project_or_git_reads(
     monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
     root = tmp_path / "repo"
     project_id = initialized_repository(root)
+
+    def _fixed_clock() -> datetime:
+        return datetime(2026, 9, 7, 0, 1, 0, tzinfo=UTC)
+
+    def _boom_project(*args: object, **kwargs: object) -> object:
+        raise AssertionError("expired must not resolve project")
+
+    def _boom_capture(*args: object, **kwargs: object) -> object:
+        raise AssertionError("expired must not read Git")
+
     monkeypatch.setattr(
-        finalization_service,
-        "_CLOCK",
-        lambda: datetime(2026, 9, 7, 0, 1, 0, tzinfo=UTC),
+        "crucible_core.application.finalizations.resolve_project",
+        _boom_project,
     )
-    with TestClient(app) as client:
+    test_app = _test_app(_boom_capture, clock=_fixed_clock)
+    with TestClient(test_app) as client:
         task_id = admit(client, project_id, root)
         event = completion(project_id, root, task_id)
         event["payload"]["terminal_observed_at"] = "2026-09-07T00:00:00Z"
         event["payload"]["capture_not_after"] = "2026-09-07T00:00:10Z"
-
-        def _boom_project(*args: object, **kwargs: object) -> object:
-            raise AssertionError("expired must not resolve project")
-
-        def _boom_capture(*args: object, **kwargs: object) -> object:
-            raise AssertionError("expired must not read Git")
-
-        monkeypatch.setattr(
-            "crucible_core.application.finalizations.resolve_project",
-            _boom_project,
-        )
-        monkeypatch.setattr(
-            finalization_service, "_capture_final", _boom_capture
-        )
         response = client.post("/v1/events", json=event)
         detail = client.get(f"/v1/tasks/{task_id}").json()["data"]["task"]
     assert response.status_code == 200, response.text
@@ -832,19 +864,17 @@ def test_excessive_window_rejects_before_git(monkeypatch, tmp_path):
     monkeypatch.setenv(TERMINAL_WINDOW_ENV, "60")
     root = tmp_path / "repo"
     project_id = initialized_repository(root)
-    monkeypatch.setattr(
-        finalization_service,
-        "_CLOCK",
-        lambda: datetime(2026, 9, 7, 0, 0, 45, tzinfo=UTC),
-    )
-    with TestClient(app) as client:
+
+    def _fixed_clock() -> datetime:
+        return datetime(2026, 9, 7, 0, 0, 45, tzinfo=UTC)
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise AssertionError("excessive window must not read Git")
+
+    test_app = _test_app(_boom, clock=_fixed_clock)
+    with TestClient(test_app) as client:
         task_id = admit(client, project_id, root)
         event = completion(project_id, root, task_id)
-
-        def _boom(*args: object, **kwargs: object) -> object:
-            raise AssertionError("excessive window must not read Git")
-
-        monkeypatch.setattr(finalization_service, "_capture_final", _boom)
         response = client.post("/v1/events", json=event)
         detail = client.get(f"/v1/tasks/{task_id}").json()["data"]["task"]
     assert response.json()["data"]["code"] == "INVALID_CAPTURE_WINDOW"
@@ -855,21 +885,19 @@ def test_future_observation_rejects_before_git(monkeypatch, tmp_path):
     monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
     root = tmp_path / "repo"
     project_id = initialized_repository(root)
-    monkeypatch.setattr(
-        finalization_service,
-        "_CLOCK",
-        lambda: datetime(2026, 9, 7, 0, 0, 0, tzinfo=UTC),
-    )
-    with TestClient(app) as client:
+
+    def _fixed_clock() -> datetime:
+        return datetime(2026, 9, 7, 0, 0, 0, tzinfo=UTC)
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise AssertionError("future observation must not read Git")
+
+    test_app = _test_app(_boom, clock=_fixed_clock)
+    with TestClient(test_app) as client:
         task_id = admit(client, project_id, root)
         event = completion(project_id, root, task_id)
         event["payload"]["terminal_observed_at"] = "2026-09-07T00:01:00Z"
         event["payload"]["capture_not_after"] = "2026-09-07T00:02:00Z"
-
-        def _boom(*args: object, **kwargs: object) -> object:
-            raise AssertionError("future observation must not read Git")
-
-        monkeypatch.setattr(finalization_service, "_capture_final", _boom)
         response = client.post("/v1/events", json=event)
         detail = client.get(f"/v1/tasks/{task_id}").json()["data"]["task"]
     assert response.json()["data"]["code"] == "INVALID_TERMINAL_OBSERVED_AT"
@@ -881,16 +909,15 @@ def test_missing_window_config_defaults_to_two_seconds(monkeypatch, tmp_path):
     monkeypatch.delenv(TERMINAL_WINDOW_ENV, raising=False)
     root = tmp_path / "repo"
     project_id = initialized_repository(root)
-    with TestClient(app) as client:
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise AssertionError("default window must not read Git")
+
+    with TestClient(_test_app(_boom)) as client:
         task_id = admit(client, project_id, root)
         event = completion(project_id, root, task_id)
         event["payload"]["terminal_observed_at"] = "2026-09-07T00:00:30Z"
         event["payload"]["capture_not_after"] = "2026-09-07T00:01:00Z"
-
-        def _boom(*args: object, **kwargs: object) -> object:
-            raise AssertionError("default window must not read Git")
-
-        monkeypatch.setattr(finalization_service, "_capture_final", _boom)
         response = client.post("/v1/events", json=event)
         detail = client.get(f"/v1/tasks/{task_id}").json()["data"]["task"]
     assert response.status_code == 400
@@ -903,16 +930,15 @@ def test_invalid_window_config_is_fail_closed(monkeypatch, tmp_path):
     monkeypatch.setenv(TERMINAL_WINDOW_ENV, "not-a-number")
     root = tmp_path / "repo"
     project_id = initialized_repository(root)
-    with TestClient(app) as client:
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise AssertionError("unconfigured must not read Git")
+
+    with TestClient(_test_app(_boom)) as client:
         task_id = admit(client, project_id, root)
         event = completion(project_id, root, task_id)
         event["payload"]["terminal_observed_at"] = "2026-09-07T00:00:30Z"
         event["payload"]["capture_not_after"] = "2026-09-07T00:01:00Z"
-
-        def _boom(*args: object, **kwargs: object) -> object:
-            raise AssertionError("unconfigured must not read Git")
-
-        monkeypatch.setattr(finalization_service, "_capture_final", _boom)
         response = client.post("/v1/events", json=event)
         detail = client.get(f"/v1/tasks/{task_id}").json()["data"]["task"]
     assert response.status_code == 500
@@ -927,7 +953,11 @@ def test_legacy_null_execution_id_cannot_complete(monkeypatch, tmp_path):
     monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
     root = tmp_path / "repo"
     project_id = initialized_repository(root)
-    with TestClient(app) as client:
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise AssertionError("legacy mismatch must not read Git")
+
+    with TestClient(_test_app(_boom)) as client:
         task_id = admit(client, project_id, root)
         connection = sqlite3.connect(database_path(tmp_path))
         try:
@@ -939,11 +969,6 @@ def test_legacy_null_execution_id_cannot_complete(monkeypatch, tmp_path):
         finally:
             connection.close()
         event = completion(project_id, root, task_id)
-
-        def _boom(*args: object, **kwargs: object) -> object:
-            raise AssertionError("legacy mismatch must not read Git")
-
-        monkeypatch.setattr(finalization_service, "_capture_final", _boom)
         response = client.post("/v1/events", json=event)
         detail = client.get(f"/v1/tasks/{task_id}").json()["data"]["task"]
     assert response.status_code == 409
@@ -955,31 +980,29 @@ def test_expiry_race_in_begin_rejects_without_capture(monkeypatch, tmp_path):
     monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
     root = tmp_path / "repo"
     project_id = initialized_repository(root)
-    with TestClient(app) as client:
+    valid_at = datetime(2026, 9, 7, 0, 0, 45, tzinfo=UTC)
+    expired_at = datetime(2026, 9, 7, 0, 1, 1, tzinfo=UTC)
+    calls = {"count": 0}
+
+    def _race_clock() -> datetime:
+        calls["count"] += 1
+        if calls["count"] <= 2:
+            return valid_at
+        return expired_at
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise AssertionError("race expiry must not read Git")
+
+    monkeypatch.setattr(
+        "crucible_core.application.finalizations.resolve_project",
+        _boom,
+    )
+    test_app = _test_app(_boom, clock=_race_clock)
+    with TestClient(test_app) as client:
         task_id = admit(client, project_id, root)
         event = completion(project_id, root, task_id)
         event["payload"]["terminal_observed_at"] = "2026-09-07T00:00:30Z"
         event["payload"]["capture_not_after"] = "2026-09-07T00:01:00Z"
-        valid_at = datetime(2026, 9, 7, 0, 0, 45, tzinfo=UTC)
-        expired_at = datetime(2026, 9, 7, 0, 1, 1, tzinfo=UTC)
-        calls = {"count": 0}
-
-        def _race_clock() -> datetime:
-            calls["count"] += 1
-            if calls["count"] <= 2:
-                return valid_at
-            return expired_at
-
-        monkeypatch.setattr(finalization_service, "_CLOCK", _race_clock)
-
-        def _boom(*args: object, **kwargs: object) -> object:
-            raise AssertionError("race expiry must not read Git")
-
-        monkeypatch.setattr(finalization_service, "_capture_final", _boom)
-        monkeypatch.setattr(
-            "crucible_core.application.finalizations.resolve_project",
-            _boom,
-        )
         response = client.post("/v1/events", json=event)
         detail = client.get(f"/v1/tasks/{task_id}").json()["data"]["task"]
         stored = client.get(f"/v1/events/{event['event_id']}").json()["data"][
@@ -1060,18 +1083,17 @@ def test_abort_marks_running_failed_without_git_reads(monkeypatch, tmp_path):
     monkeypatch.delenv(TERMINAL_WINDOW_ENV, raising=False)
     root = tmp_path / "repo"
     project_id = initialized_repository(root)
-    with TestClient(app) as client:
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise AssertionError("abort must not read Git")
+
+    monkeypatch.setattr(
+        "crucible_core.application.finalizations.resolve_project",
+        _boom,
+    )
+    with TestClient(_test_app(_boom)) as client:
         task_id = admit(client, project_id, root)
         event = aborted(project_id, root, task_id)
-
-        def _boom(*args: object, **kwargs: object) -> object:
-            raise AssertionError("abort must not read Git")
-
-        monkeypatch.setattr(finalization_service, "_capture_final", _boom)
-        monkeypatch.setattr(
-            "crucible_core.application.finalizations.resolve_project",
-            _boom,
-        )
         response = client.post("/v1/events", json=event)
         detail = client.get(f"/v1/tasks/{task_id}").json()["data"]["task"]
         stored = client.get(f"/v1/events/{event['event_id']}").json()["data"][
@@ -1110,18 +1132,17 @@ def test_abort_replay_is_stable_without_git(monkeypatch, tmp_path):
     monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
     root = tmp_path / "repo"
     project_id = initialized_repository(root)
-    with TestClient(app) as client:
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise AssertionError("replay must not read Git")
+
+    monkeypatch.setattr(
+        "crucible_core.application.finalizations.resolve_project",
+        _boom,
+    )
+    with TestClient(_test_app(_boom)) as client:
         task_id = admit(client, project_id, root)
         event = aborted(project_id, root, task_id)
-
-        def _boom(*args: object, **kwargs: object) -> object:
-            raise AssertionError("replay must not read Git")
-
-        monkeypatch.setattr(finalization_service, "_capture_final", _boom)
-        monkeypatch.setattr(
-            "crucible_core.application.finalizations.resolve_project",
-            _boom,
-        )
         first = client.post("/v1/events", json=event)
         replay = client.post("/v1/events", json=event)
         conflicted = aborted(project_id, root, task_id)
@@ -1144,14 +1165,13 @@ def test_abort_rejects_unsupported_reason_without_transition(
     monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
     root = tmp_path / "repo"
     project_id = initialized_repository(root)
-    with TestClient(app) as client:
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise AssertionError("invalid abort must not read Git")
+
+    with TestClient(_test_app(_boom)) as client:
         task_id = admit(client, project_id, root)
         event = aborted(project_id, root, task_id, reason="UNKNOWN_REASON")
-
-        def _boom(*args: object, **kwargs: object) -> object:
-            raise AssertionError("invalid abort must not read Git")
-
-        monkeypatch.setattr(finalization_service, "_capture_final", _boom)
         response = client.post("/v1/events", json=event)
         extra = aborted(project_id, root, task_id)
         extra["payload"] = {
@@ -1170,13 +1190,12 @@ def test_abort_requires_correlation_before_transition(monkeypatch, tmp_path):
     monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
     root = tmp_path / "repo"
     project_id = initialized_repository(root)
-    with TestClient(app) as client:
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise AssertionError("mismatch must not read Git")
+
+    with TestClient(_test_app(_boom)) as client:
         task_id = admit(client, project_id, root)
-
-        def _boom(*args: object, **kwargs: object) -> object:
-            raise AssertionError("mismatch must not read Git")
-
-        monkeypatch.setattr(finalization_service, "_capture_final", _boom)
         execution_mismatch = aborted(project_id, root, task_id)
         execution_mismatch["execution_id"] = "execution-other"
         execution_response = client.post("/v1/events", json=execution_mismatch)
@@ -1248,7 +1267,11 @@ def test_abort_on_finalizing_fails_closed(monkeypatch, tmp_path):
     monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
     root = tmp_path / "repo"
     project_id = initialized_repository(root)
-    with TestClient(app) as client:
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise AssertionError("finalizing abort must not read Git")
+
+    with TestClient(_test_app(_boom)) as client:
         task_id = admit(client, project_id, root)
         connection = sqlite3.connect(database_path(tmp_path))
         try:
@@ -1259,11 +1282,6 @@ def test_abort_on_finalizing_fails_closed(monkeypatch, tmp_path):
             connection.commit()
         finally:
             connection.close()
-
-        def _boom(*args: object, **kwargs: object) -> object:
-            raise AssertionError("finalizing abort must not read Git")
-
-        monkeypatch.setattr(finalization_service, "_capture_final", _boom)
         response = client.post(
             "/v1/events", json=aborted(project_id, root, task_id)
         )
@@ -1590,11 +1608,16 @@ def test_fenced_worker_late_snapshot_never_publishes(monkeypatch, tmp_path):
                 changes=[],
             )
 
-        monkeypatch.setattr(worker, "spawn_capture", _fake_spawn)
-        monkeypatch.setattr(worker, "wait_capture", _fake_wait)
-        monkeypatch.setattr(worker, "snapshot_tree_keys", _fake_snapshot_keys)
-        monkeypatch.setattr(worker, "cancel_capture", _fake_cancel)
+        test_app = build_app(
+            capture_runner=_FakeRunner(
+                _fake_spawn,
+                _fake_wait,
+                _fake_snapshot_keys,
+                _fake_cancel,
+            )
+        )
 
+    with TestClient(test_app) as client:
         event_a = completion(project_id, root, task_a)
         response = client.post("/v1/events", json=event_a)
 
@@ -1717,11 +1740,16 @@ def test_fenced_worker_eof_converts_to_stale(monkeypatch, tmp_path):
             # fence must supersede it.
             raise FinalizationError(worker.IPC_FAILED_CODE, 500)
 
-        monkeypatch.setattr(worker, "spawn_capture", _fake_spawn)
-        monkeypatch.setattr(worker, "wait_capture", _fake_wait)
-        monkeypatch.setattr(worker, "snapshot_tree_keys", _fake_snapshot_keys)
-        monkeypatch.setattr(worker, "cancel_capture", _fake_cancel)
+        test_app = build_app(
+            capture_runner=_FakeRunner(
+                _fake_spawn,
+                _fake_wait,
+                _fake_snapshot_keys,
+                _fake_cancel,
+            )
+        )
 
+    with TestClient(test_app) as client:
         event_a = completion(project_id, root, task_a)
         response = client.post("/v1/events", json=event_a)
 
@@ -1771,8 +1799,11 @@ def test_worker_ipc_failure_without_fence_stays_500(monkeypatch, tmp_path):
             # public worker-failure contract, never leaks.
             raise FinalizationError(worker.IPC_FAILED_CODE, 500)
 
-        monkeypatch.setattr(worker, "spawn_capture", _fake_spawn)
-        monkeypatch.setattr(worker, "wait_capture", _fake_wait)
+        test_app = build_app(
+            capture_runner=_FakeRunner(_fake_spawn, _fake_wait)
+        )
+
+    with TestClient(test_app) as client:
         response = client.post(
             "/v1/events", json=completion(project_id, root, task_a)
         )
@@ -1835,10 +1866,13 @@ def test_fenced_worker_preserves_capture_error_code(monkeypatch, tmp_path):
             assert b_response.status_code == 200, b_response.text
             raise FinalizationError("BRANCH_CHANGED_DURING_TASK")
 
-        monkeypatch.setattr(worker, "spawn_capture", _fake_spawn)
-        monkeypatch.setattr(worker, "wait_capture", _fake_wait)
-        monkeypatch.setattr(worker, "snapshot_tree_keys", _fake_snapshot_keys)
+        test_app = build_app(
+            capture_runner=_FakeRunner(
+                _fake_spawn, _fake_wait, _fake_snapshot_keys
+            )
+        )
 
+    with TestClient(test_app) as client:
         event_a = completion(project_id, root, task_a)
         response = client.post("/v1/events", json=event_a)
 
@@ -1903,10 +1937,13 @@ def test_fenced_worker_genuine_envelope_failure_stays_500(
             assert b_response.status_code == 200, b_response.text
             raise FinalizationError("FINALIZATION_FAILED", 500)
 
-        monkeypatch.setattr(worker, "spawn_capture", _fake_spawn)
-        monkeypatch.setattr(worker, "wait_capture", _fake_wait)
-        monkeypatch.setattr(worker, "snapshot_tree_keys", _fake_snapshot_keys)
+        test_app = build_app(
+            capture_runner=_FakeRunner(
+                _fake_spawn, _fake_wait, _fake_snapshot_keys
+            )
+        )
 
+    with TestClient(test_app) as client:
         event_a = completion(project_id, root, task_a)
         response = client.post("/v1/events", json=event_a)
 
@@ -1969,10 +2006,13 @@ def test_fenced_worker_envelope_timeout_preserves_code(monkeypatch, tmp_path):
             assert b_response.status_code == 200, b_response.text
             raise FinalizationError("FINAL_SNAPSHOT_TIMEOUT")
 
-        monkeypatch.setattr(worker, "spawn_capture", _fake_spawn)
-        monkeypatch.setattr(worker, "wait_capture", _fake_wait)
-        monkeypatch.setattr(worker, "snapshot_tree_keys", _fake_snapshot_keys)
+        test_app = build_app(
+            capture_runner=_FakeRunner(
+                _fake_spawn, _fake_wait, _fake_snapshot_keys
+            )
+        )
 
+    with TestClient(test_app) as client:
         event_a = completion(project_id, root, task_a)
         response = client.post("/v1/events", json=event_a)
 
@@ -2035,10 +2075,13 @@ def test_fenced_worker_local_timeout_converts_to_stale(monkeypatch, tmp_path):
             assert b_response.status_code == 200, b_response.text
             raise FinalizationError(worker.WAIT_TIMEOUT_CODE)
 
-        monkeypatch.setattr(worker, "spawn_capture", _fake_spawn)
-        monkeypatch.setattr(worker, "wait_capture", _fake_wait)
-        monkeypatch.setattr(worker, "snapshot_tree_keys", _fake_snapshot_keys)
+        test_app = build_app(
+            capture_runner=_FakeRunner(
+                _fake_spawn, _fake_wait, _fake_snapshot_keys
+            )
+        )
 
+    with TestClient(test_app) as client:
         event_a = completion(project_id, root, task_a)
         response = client.post("/v1/events", json=event_a)
 
@@ -2060,3 +2103,395 @@ def test_fenced_worker_local_timeout_converts_to_stale(monkeypatch, tmp_path):
         connection.close()
     assert task == ("failed", "FINAL_CAPTURE_FENCED_BY_NEXT_INPUT", None)
     assert changes == 0
+
+
+def test_frozen_finalizing_replay_retries_materialize_only(
+    monkeypatch, tmp_path
+):
+    """Lock transitório: replay idempotente retenta só materialize.
+
+    O primeiro task_completed congela e falha em materialize com
+    lock transitório (sem restart/recover). O replay do mesmo
+    evento deve concluir via materialize SQLite, sem nova captura
+    Git, e responder ACK accepted.
+    """
+    monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
+    root = tmp_path / "repo"
+    project_id = initialized_repository(root)
+    captures = {"count": 0}
+
+    def _counting_capture(*args, **kwargs):
+        captures["count"] += 1
+        return capture_final(*args, **kwargs)
+
+    test_app = _test_app(_counting_capture)
+    original_materialize = FinalizationCoordinator.materialize
+    state = {"failed_once": False}
+
+    def _flaky_materialize(self, task_id: str) -> None:
+        if not state["failed_once"]:
+            state["failed_once"] = True
+            raise sqlite3.OperationalError("database is locked")
+        return original_materialize(self, task_id)
+
+    monkeypatch.setattr(
+        FinalizationCoordinator, "materialize", _flaky_materialize
+    )
+    with TestClient(test_app) as client:
+        task_id = admit(client, project_id, root)
+        (root / "tracked.txt").write_text("after\n", encoding="utf-8")
+        event = completion(project_id, root, task_id)
+        first = client.post("/v1/events", json=event)
+        assert first.status_code == 409, first.text
+        assert first.json()["data"]["code"] == "FINALIZATION_IN_PROGRESS"
+        assert captures["count"] == 1
+        connection = sqlite3.connect(database_path(tmp_path))
+        try:
+            task = connection.execute(
+                "SELECT status, snapshot_frozen_at FROM tasks WHERE id = ?",
+                (task_id,),
+            ).fetchone()
+            inbound = connection.execute(
+                "SELECT status FROM inbound_events WHERE id = ?",
+                (event["event_id"],),
+            ).fetchone()
+        finally:
+            connection.close()
+        assert task[0] == "finalizing"
+        assert task[1] is not None
+        assert inbound[0] == "processing"
+        # Lock liberado (flaky só falha uma vez): replay síncrono
+        # do mesmo evento conclui sem restart/recover global.
+        second = client.post("/v1/events", json=event)
+        assert second.status_code == 200, second.text
+        body = second.json()["data"]["event"]
+        assert body["outcome"] == "completed"
+        assert body["task_id"] == task_id
+        assert captures["count"] == 1
+        third = client.post("/v1/events", json=event)
+        assert third.json() == second.json()
+        detail = client.get(f"/v1/tasks/{task_id}").json()["data"]["task"]
+        assert detail["status"] == "completed"
+
+
+def test_concurrent_frozen_replays_stay_idempotent(monkeypatch, tmp_path):
+    """Dois retries concorrentes do mesmo evento permanecem idempotentes."""
+    monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
+    root = tmp_path / "repo"
+    project_id = initialized_repository(root)
+    captures = {"count": 0}
+
+    def _counting_capture(*args, **kwargs):
+        captures["count"] += 1
+        return capture_final(*args, **kwargs)
+
+    test_app = _test_app(_counting_capture)
+    original_materialize = FinalizationCoordinator.materialize
+    state = {"failed_once": False}
+
+    def _flaky_materialize(self, task_id: str) -> None:
+        if not state["failed_once"]:
+            state["failed_once"] = True
+            raise sqlite3.OperationalError("database is locked")
+        return original_materialize(self, task_id)
+
+    monkeypatch.setattr(
+        FinalizationCoordinator, "materialize", _flaky_materialize
+    )
+    with TestClient(test_app) as client:
+        task_id = admit(client, project_id, root)
+        (root / "tracked.txt").write_text("after\n", encoding="utf-8")
+        event = completion(project_id, root, task_id)
+        first = client.post("/v1/events", json=event)
+        assert first.status_code == 409, first.text
+        results: list = [None, None]
+
+        def _replay(slot: int) -> None:
+            results[slot] = client.post("/v1/events", json=event)
+
+        threads = [
+            threading.Thread(target=_replay, args=(slot,)) for slot in (0, 1)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+        assert not any(thread.is_alive() for thread in threads)
+        assert all(response is not None for response in results)
+        # Pelo menos um retry conclui; o outro nunca corrompe:
+        # ou conclui igual ou observa IN_PROGRESS transitório.
+        codes = sorted(
+            response.status_code for response in results  # type: ignore[union-attr]
+        )
+        assert codes in ([200, 200], [200, 409])
+        for response in results:  # type: ignore[union-attr]
+            if response.status_code == 409:
+                assert (
+                    response.json()["data"]["code"]
+                    == "FINALIZATION_IN_PROGRESS"
+                )
+            else:
+                assert (
+                    response.json()["data"]["event"]["outcome"] == "completed"
+                )
+        stable = client.post("/v1/events", json=event)
+        assert stable.status_code == 200, stable.text
+        assert stable.json()["data"]["event"]["outcome"] == "completed"
+        assert captures["count"] == 1
+        detail = client.get(f"/v1/tasks/{task_id}").json()["data"]["task"]
+        assert detail["status"] == "completed"
+
+
+def test_frozen_replay_with_corrupt_evidence_terminalizes(
+    monkeypatch, tmp_path
+):
+    """Replay frozen com evidência corrompida terminaliza como o fluxo inicial.
+
+    Lock transitório congela sem concluir; a corrupção posterior
+    (gzip inválido com evidência complete) faz o replay falhar
+    definitivo via _fail: task failed + evento rejected, sem nova
+    captura Git, e replay seguinte permanece idempotente.
+    """
+    monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
+    root = tmp_path / "repo"
+    project_id = initialized_repository(root)
+    captures = {"count": 0}
+
+    def _counting_capture(*args, **kwargs):
+        captures["count"] += 1
+        return capture_final(*args, **kwargs)
+
+    test_app = _test_app(_counting_capture)
+    original_materialize = FinalizationCoordinator.materialize
+    state = {"failed_once": False}
+
+    def _flaky_materialize(self, task_id: str) -> None:
+        if not state["failed_once"]:
+            state["failed_once"] = True
+            raise sqlite3.OperationalError("database is locked")
+        return original_materialize(self, task_id)
+
+    monkeypatch.setattr(
+        FinalizationCoordinator, "materialize", _flaky_materialize
+    )
+    with TestClient(test_app) as client:
+        task_id = admit(client, project_id, root)
+        (root / "tracked.txt").write_text("after\n", encoding="utf-8")
+        event = completion(project_id, root, task_id)
+        first = client.post("/v1/events", json=event)
+        assert first.status_code == 409, first.text
+        assert first.json()["data"]["code"] == "FINALIZATION_IN_PROGRESS"
+        assert captures["count"] == 1
+        # Corrompe a evidência congelada: blob final inválido
+        # com evidence complete falha definitivo em _patch.
+        connection = sqlite3.connect(database_path(tmp_path))
+        try:
+            connection.execute(
+                "UPDATE task_file_changes SET final_content = ?"
+                " WHERE task_id = ?",
+                (b"not-gzip-at-all", task_id),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        second = client.post("/v1/events", json=event)
+        assert second.status_code == 500, second.text
+        assert (
+            second.json()["data"]["code"] == "FINAL_MATERIALIZATION_FAILED"
+        )
+        assert captures["count"] == 1
+        connection = sqlite3.connect(database_path(tmp_path))
+        try:
+            task = connection.execute(
+                "SELECT status, failure_code FROM tasks WHERE id = ?",
+                (task_id,),
+            ).fetchone()
+            inbound = connection.execute(
+                "SELECT status, outcome, failure_code FROM inbound_events"
+                " WHERE id = ?",
+                (event["event_id"],),
+            ).fetchone()
+        finally:
+            connection.close()
+        assert task == ("failed", "FINAL_MATERIALIZATION_FAILED")
+        assert inbound == (
+            "rejected",
+            "rejected",
+            "FINAL_MATERIALIZATION_FAILED",
+        )
+        third = client.post("/v1/events", json=event)
+        assert third.status_code == 500, third.text
+        assert third.json()["data"]["code"] == "FINAL_MATERIALIZATION_FAILED"
+        assert captures["count"] == 1
+        detail = client.get(f"/v1/tasks/{task_id}").json()["data"]["task"]
+        assert detail["status"] == "failed"
+
+
+def test_frozen_replay_fail_lock_stays_retryable_then_terminalizes(
+    monkeypatch, tmp_path
+):
+    """_fail com lock não mascara definitivo como terminal.
+
+    Replay frozen com evidência corrompida cujo _fail sofre
+    locked devolve 409 e mantém finalizing/processing; o retry
+    seguinte terminaliza failed/rejected e estabiliza idempotente.
+    """
+    monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
+    root = tmp_path / "repo"
+    project_id = initialized_repository(root)
+    captures = {"count": 0}
+
+    def _counting_capture(*args, **kwargs):
+        captures["count"] += 1
+        return capture_final(*args, **kwargs)
+
+    test_app = _test_app(_counting_capture)
+    original_materialize = FinalizationCoordinator.materialize
+    original_fail = FinalizationCoordinator._fail
+    state = {"materialize_calls": 0, "fail_calls": 0}
+
+    def _flaky_materialize(self, task_id: str) -> None:
+        state["materialize_calls"] += 1
+        if state["materialize_calls"] == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return original_materialize(self, task_id)
+
+    def _flaky_fail(self, task_id: str, generation, code: str) -> None:
+        state["fail_calls"] += 1
+        if state["fail_calls"] == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return original_fail(self, task_id, generation, code)
+
+    monkeypatch.setattr(
+        FinalizationCoordinator, "materialize", _flaky_materialize
+    )
+    monkeypatch.setattr(FinalizationCoordinator, "_fail", _flaky_fail)
+    with TestClient(test_app) as client:
+        task_id = admit(client, project_id, root)
+        (root / "tracked.txt").write_text("after\n", encoding="utf-8")
+        event = completion(project_id, root, task_id)
+        # Lock no materialize inicial: congela sem concluir.
+        first = client.post("/v1/events", json=event)
+        assert first.status_code == 409, first.text
+        assert first.json()["data"]["code"] == "FINALIZATION_IN_PROGRESS"
+        assert captures["count"] == 1
+        # Corrompe a evidência congelada: blob final inválido
+        # com evidence complete falha definitivo em _patch.
+        connection = sqlite3.connect(database_path(tmp_path))
+        try:
+            connection.execute(
+                "UPDATE task_file_changes SET final_content = ?"
+                " WHERE task_id = ?",
+                (b"not-gzip-at-all", task_id),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        # _fail com lock: definitivo não pode mascarar como
+        # terminal; mantém 409 retryable e finalizing/processing.
+        retry1 = client.post("/v1/events", json=event)
+        assert retry1.status_code == 409, retry1.text
+        assert retry1.json()["data"]["code"] == "FINALIZATION_IN_PROGRESS"
+        connection = sqlite3.connect(database_path(tmp_path))
+        try:
+            task_row = connection.execute(
+                "SELECT status FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+            inbound_row = connection.execute(
+                "SELECT status FROM inbound_events WHERE id = ?",
+                (event["event_id"],),
+            ).fetchone()
+        finally:
+            connection.close()
+        assert task_row[0] == "finalizing"
+        assert inbound_row[0] == "processing"
+        # Lock liberado: retry terminaliza failed/rejected.
+        retry2 = client.post("/v1/events", json=event)
+        assert retry2.status_code == 500, retry2.text
+        assert (
+            retry2.json()["data"]["code"] == "FINAL_MATERIALIZATION_FAILED"
+        )
+        assert captures["count"] == 1
+        connection = sqlite3.connect(database_path(tmp_path))
+        try:
+            task_row = connection.execute(
+                "SELECT status, failure_code FROM tasks WHERE id = ?",
+                (task_id,),
+            ).fetchone()
+            inbound_row = connection.execute(
+                "SELECT status, outcome, failure_code FROM inbound_events"
+                " WHERE id = ?",
+                (event["event_id"],),
+            ).fetchone()
+        finally:
+            connection.close()
+        assert task_row == ("failed", "FINAL_MATERIALIZATION_FAILED")
+        assert inbound_row == (
+            "rejected",
+            "rejected",
+            "FINAL_MATERIALIZATION_FAILED",
+        )
+        retry3 = client.post("/v1/events", json=event)
+        assert retry3.status_code == 500, retry3.text
+        assert retry3.json()["data"]["code"] == "FINAL_MATERIALIZATION_FAILED"
+        assert captures["count"] == 1
+        detail = client.get(f"/v1/tasks/{task_id}").json()["data"]["task"]
+        assert detail["status"] == "failed"
+
+
+def test_lifespan_composes_runner_per_lifespan(monkeypatch, tmp_path):
+    monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
+    root = tmp_path / "repo"
+    project_id = initialized_repository(root)
+    first_app = build_app()
+    other = build_app()
+    with TestClient(first_app) as client:
+        first = first_app.state.capture_runner
+        assert isinstance(first, worker.ProcessCaptureRunner)
+        assert first is not worker.get_default_runner()
+        admitted = client.post("/v1/events", json=candidate(project_id, root))
+        assert admitted.status_code == 200, admitted.text
+        # Same lifespan shares one runner across requests.
+        assert first_app.state.capture_runner is first
+        task_id = admitted.json()["data"]["event"]["task_id"]
+        (root / "tracked.txt").write_text("after\n", encoding="utf-8")
+        completed = client.post(
+            "/v1/events", json=completion(project_id, root, task_id)
+        )
+        assert completed.status_code == 200, completed.text
+        assert first_app.state.capture_runner is first
+        detail = client.get(f"/v1/tasks/{task_id}").json()["data"]["task"]
+        assert detail["status"] == "completed"
+    assert first.registry == {}
+    with TestClient(other):
+        second = other.state.capture_runner
+        assert isinstance(second, worker.ProcessCaptureRunner)
+        # Distinct lifespans never share a runner/registry, so one
+        # shutdown cannot reap the other's captures.
+        assert second is not first
+        assert second is not worker.get_default_runner()
+    assert second.registry == {}
+
+
+def test_composed_test_apps_are_isolated(monkeypatch, tmp_path):
+    """Per-app composition never leaks across apps or lifecycles.
+
+    Each built app holds its own frozen composition and owns its
+    runner; no per-app mutable override dict is involved, so one
+    app's injections cannot affect concurrent requests on another.
+    """
+    monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
+    first_app = build_app()
+    second_app = build_app()
+    assert first_app.state.composition is not second_app.state.composition
+    assert first_app.dependency_overrides == {}
+    assert second_app.dependency_overrides == {}
+    with TestClient(first_app):
+        first_runner = first_app.state.capture_runner
+        assert isinstance(first_runner, worker.ProcessCaptureRunner)
+    with TestClient(second_app):
+        second_runner = second_app.state.capture_runner
+        assert isinstance(second_runner, worker.ProcessCaptureRunner)
+    assert first_runner is not second_runner
+    assert first_runner.registry == {}
+    assert second_runner.registry == {}

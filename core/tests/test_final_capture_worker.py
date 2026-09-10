@@ -18,16 +18,11 @@ from crucible_core.schemas.finalizations import (
 )
 
 
-@pytest.fixture(autouse=True)
-def _clean_registry():
-    worker.clear_registry_for_tests()
-    yield
-    for key in list(worker._REGISTRY.keys()):
-        try:
-            worker.cancel_capture(key)
-        except Exception:
-            pass
-    worker.clear_registry_for_tests()
+@pytest.fixture()
+def runner():
+    owned = worker.ProcessCaptureRunner()
+    yield owned
+    owned.shutdown()
 
 
 def _init_repo(root: Path) -> tuple[str, str]:
@@ -105,50 +100,50 @@ def test_target_top_level_importable():
     assert worker._CTX.get_start_method() == "spawn"
 
 
-def test_spawn_real_returns_snapshot_with_bytes(tmp_path):
+def test_spawn_real_returns_snapshot_with_bytes(tmp_path, runner):
     root = tmp_path / "repo"
     root.mkdir()
     head, branch = _init_repo(root)
     deadline = time.monotonic() + 10
-    key = worker.spawn_capture(
+    key = runner.spawn_capture(
         _request(root, head, branch, deadline + 10),
         "tree-1",
         1,
         "task-1",
     )
-    snapshot = worker.wait_capture(key, deadline)
+    snapshot = runner.wait_capture(key, deadline)
     assert snapshot.head == head
     assert snapshot.branch == branch
     assert isinstance(snapshot.status, bytes)
     assert isinstance(snapshot.index, bytes)
     assert snapshot.baseline_files == []
     assert snapshot.changes == []
-    assert worker._REGISTRY == {}
+    assert runner.registry == {}
 
 
-def test_spawn_real_returns_error_envelope(tmp_path):
+def test_spawn_real_returns_error_envelope(tmp_path, runner):
     root = tmp_path / "repo"
     root.mkdir()
     head, branch = _init_repo(root)
     bad = "0" * 40
     deadline = time.monotonic() + 10
-    key = worker.spawn_capture(
+    key = runner.spawn_capture(
         _request(root, bad, branch, deadline + 10),
         "tree-err",
         7,
         "task-err",
     )
     with pytest.raises(FinalizationError) as exc:
-        worker.wait_capture(key, deadline)
+        runner.wait_capture(key, deadline)
     assert exc.value.code != "FINAL_SNAPSHOT_TIMEOUT"
-    assert worker._REGISTRY == {}
+    assert runner.registry == {}
 
 
-def test_wait_timeout_terminates_and_reaps(tmp_path):
+def test_wait_timeout_terminates_and_reaps(tmp_path, runner):
     root = tmp_path / "repo"
     root.mkdir()
     head, branch = _init_repo(root)
-    key = worker.spawn_capture(
+    key = runner.spawn_capture(
         _request(root, head, branch, time.monotonic() + 10),
         "tree-timeout",
         3,
@@ -156,39 +151,39 @@ def test_wait_timeout_terminates_and_reaps(tmp_path):
     )
     expired = time.monotonic() - 1
     with pytest.raises(FinalizationError) as exc:
-        worker.wait_capture(key, expired)
+        runner.wait_capture(key, expired)
     assert exc.value.code == worker.WAIT_TIMEOUT_CODE
     assert exc.value.code != "FINAL_SNAPSHOT_TIMEOUT"
-    assert worker._REGISTRY == {}
+    assert runner.registry == {}
 
 
-def test_cancel_and_reap_tree(tmp_path):
+def test_cancel_and_reap_tree(tmp_path, runner):
     root = tmp_path / "repo"
     root.mkdir()
     head, branch = _init_repo(root)
     deadline = time.monotonic() + 10
-    key_a = worker.spawn_capture(
+    key_a = runner.spawn_capture(
         _request(root, head, branch, deadline + 10),
         "tree-cancel",
         1,
         "task-a",
     )
-    key_b = worker.spawn_capture(
+    key_b = runner.spawn_capture(
         _request(root, head, branch, deadline + 10),
         "tree-cancel",
         2,
         "task-b",
     )
-    assert worker.snapshot_tree_keys("tree-cancel") == [key_a, key_b]
-    assert worker.cancel_capture(key_a) is True
-    assert key_a not in worker._REGISTRY
-    assert worker.cancel_capture(key_a) is False
-    count = worker.cancel_tree_captures("tree-cancel")
+    assert runner.snapshot_tree_keys("tree-cancel") == [key_a, key_b]
+    assert runner.cancel_capture(key_a) is True
+    assert key_a not in runner.registry
+    assert runner.cancel_capture(key_a) is False
+    count = runner.cancel_tree_captures("tree-cancel")
     assert count == 1
-    assert worker.snapshot_tree_keys("tree-cancel") == []
+    assert runner.snapshot_tree_keys("tree-cancel") == []
     # Reap leftovers without leaking processes.
     for key in (key_a, key_b):
-        worker.cancel_capture(key)
+        runner.cancel_capture(key)
     assert json.dumps({"ok": True})
     assert str(uuid.uuid4())
 
@@ -208,15 +203,16 @@ def _fake_request() -> FinalCaptureRequest:
 def test_spawn_start_and_cancel_are_atomic(monkeypatch):
     """Cancel racing spawn must block until start completes.
 
-    Registry insertion and Process.start share one BOUNDARY_LOCK
+    Registry insertion and Process.start share one boundary-lock
     section, so cancel can never slip between them and remove an
-    unstarted handle: the worker always starts before it is
+    unstarted handle: the child always starts before it is
     cancelled, never after the cancel returned.
     """
     start_entered = threading.Event()
     allow_start = threading.Event()
     cancel_done = threading.Event()
     created: list = []
+    owned = worker.ProcessCaptureRunner()
 
     class _FakeConn:
         def close(self) -> None:
@@ -264,7 +260,7 @@ def test_spawn_start_and_cancel_are_atomic(monkeypatch):
 
     def _spawn() -> None:
         try:
-            key_holder["key"] = worker.spawn_capture(
+            key_holder["key"] = owned.spawn_capture(
                 _fake_request(), "tree-atomic", 1, "task-atomic"
             )
         except Exception as error:  # pragma: no cover
@@ -277,24 +273,27 @@ def test_spawn_start_and_cancel_are_atomic(monkeypatch):
     cancel_result: dict = {}
 
     def _cancel() -> None:
-        cancel_result["count"] = worker.cancel_tree_captures("tree-atomic")
+        cancel_result["count"] = owned.cancel_tree_captures("tree-atomic")
         cancel_done.set()
 
     canceller = threading.Thread(target=_cancel)
     canceller.start()
-    # Cancel must stay blocked while start holds BOUNDARY_LOCK.
+    # Cancel must stay blocked while start holds the boundary lock.
     assert cancel_done.wait(timeout=0.2) is False
     allow_start.set()
     spawner.join(timeout=10)
     canceller.join(timeout=10)
 
-    assert not errors
-    assert len(created) == 1
-    # Started before cancel removed it: never started-after-cancel.
-    assert created[0].started is True
-    assert created[0].terminated is True
-    assert cancel_result.get("count") == 1
-    assert worker._REGISTRY == {}
+    try:
+        assert not errors
+        assert len(created) == 1
+        # Started before cancel removed it: never started-after-cancel.
+        assert created[0].started is True
+        assert created[0].terminated is True
+        assert cancel_result.get("count") == 1
+        assert owned.registry == {}
+    finally:
+        owned.shutdown()
 
 
 def test_spawn_start_error_cleans_registry(monkeypatch):
@@ -321,13 +320,17 @@ def test_spawn_start_error_cleans_registry(monkeypatch):
             return _BoomProcess(target, args)
 
     monkeypatch.setattr(worker, "_CTX", _FakeCtx())
-    with pytest.raises(RuntimeError):
-        worker.spawn_capture(_fake_request(), "tree-boom", 9, "task")
-    assert worker._REGISTRY == {}
+    owned = worker.ProcessCaptureRunner()
+    try:
+        with pytest.raises(RuntimeError):
+            owned.spawn_capture(_fake_request(), "tree-boom", 9, "task")
+        assert owned.registry == {}
+    finally:
+        owned.shutdown()
     assert len(closed) == 2
 
 
-def _inject_wait_handle(key, conn, process=None):
+def _inject_wait_handle(owned, key, conn, process=None):
     class _DeadProcess:
         def is_alive(self) -> bool:
             return False
@@ -335,7 +338,7 @@ def _inject_wait_handle(key, conn, process=None):
         def join(self, timeout=None) -> None:
             pass
 
-    worker._REGISTRY[key] = worker._RunningCapture(
+    owned.registry[key] = worker._RunningCapture(
         tree_id=key[0],
         generation=key[1],
         task_id="task",
@@ -361,18 +364,22 @@ def test_wait_transport_eof_uses_internal_ipc_code():
         def recv(self):
             return "not-an-envelope"
 
-    key = ("tree-ipc", 1)
-    _inject_wait_handle(key, _EofConn())
-    with pytest.raises(FinalizationError) as exc:
-        worker.wait_capture(key, time.monotonic() + 10)
-    assert exc.value.code == worker.IPC_FAILED_CODE
-    assert worker._REGISTRY == {}
+    owned = worker.ProcessCaptureRunner()
+    try:
+        key = ("tree-ipc", 1)
+        _inject_wait_handle(owned, key, _EofConn())
+        with pytest.raises(FinalizationError) as exc:
+            owned.wait_capture(key, time.monotonic() + 10)
+        assert exc.value.code == worker.IPC_FAILED_CODE
+        assert owned.registry == {}
 
-    _inject_wait_handle(key, _GarbageConn())
-    with pytest.raises(FinalizationError) as exc:
-        worker.wait_capture(key, time.monotonic() + 10)
-    assert exc.value.code == worker.IPC_FAILED_CODE
-    assert worker._REGISTRY == {}
+        _inject_wait_handle(owned, key, _GarbageConn())
+        with pytest.raises(FinalizationError) as exc:
+            owned.wait_capture(key, time.monotonic() + 10)
+        assert exc.value.code == worker.IPC_FAILED_CODE
+        assert owned.registry == {}
+    finally:
+        owned.shutdown()
 
 
 def test_wait_genuine_envelope_failure_keeps_its_code():
@@ -392,13 +399,17 @@ def test_wait_genuine_envelope_failure_keeps_its_code():
         def close(self) -> None:
             pass
 
-    key = ("tree-ipc", 2)
-    _inject_wait_handle(key, _EnvelopeConn())
-    with pytest.raises(FinalizationError) as exc:
-        worker.wait_capture(key, time.monotonic() + 10)
-    assert exc.value.code == "FINALIZATION_FAILED"
-    assert exc.value.code != worker.IPC_FAILED_CODE
-    assert worker._REGISTRY == {}
+    owned = worker.ProcessCaptureRunner()
+    try:
+        key = ("tree-ipc", 2)
+        _inject_wait_handle(owned, key, _EnvelopeConn())
+        with pytest.raises(FinalizationError) as exc:
+            owned.wait_capture(key, time.monotonic() + 10)
+        assert exc.value.code == "FINALIZATION_FAILED"
+        assert exc.value.code != worker.IPC_FAILED_CODE
+        assert owned.registry == {}
+    finally:
+        owned.shutdown()
 
 
 def test_wait_genuine_envelope_timeout_keeps_its_code():
@@ -418,11 +429,15 @@ def test_wait_genuine_envelope_timeout_keeps_its_code():
         def close(self) -> None:
             pass
 
-    key = ("tree-ipc", 3)
-    _inject_wait_handle(key, _TimeoutEnvelopeConn())
-    with pytest.raises(FinalizationError) as exc:
-        worker.wait_capture(key, time.monotonic() + 10)
-    assert exc.value.code == "FINAL_SNAPSHOT_TIMEOUT"
-    assert exc.value.code != worker.IPC_FAILED_CODE
-    assert exc.value.code != worker.WAIT_TIMEOUT_CODE
-    assert worker._REGISTRY == {}
+    owned = worker.ProcessCaptureRunner()
+    try:
+        key = ("tree-ipc", 3)
+        _inject_wait_handle(owned, key, _TimeoutEnvelopeConn())
+        with pytest.raises(FinalizationError) as exc:
+            owned.wait_capture(key, time.monotonic() + 10)
+        assert exc.value.code == "FINAL_SNAPSHOT_TIMEOUT"
+        assert exc.value.code != worker.IPC_FAILED_CODE
+        assert exc.value.code != worker.WAIT_TIMEOUT_CODE
+        assert owned.registry == {}
+    finally:
+        owned.shutdown()

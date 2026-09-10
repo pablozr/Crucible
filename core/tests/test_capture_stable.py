@@ -11,6 +11,9 @@ import pytest
 import crucible_core.infrastructure.git.baseline_capture as baseline_capture
 import crucible_core.infrastructure.git.final_capture as final_capture
 from crucible_core.core.errors import AdmissionError, FinalizationError
+from crucible_core.infrastructure.git import (
+    final_capture_worker as worker,
+)
 from crucible_core.schemas.finalizations import FinalCaptureSnapshot
 
 MAX_SIZE = 1_048_576
@@ -834,8 +837,7 @@ def test_coordinator_freeze_blocked_after_hook_deadline(
 
     from fastapi.testclient import TestClient
 
-    import crucible_core.services.finalizations as finalization_service
-    from crucible_core.main import app
+    from crucible_core.main import app, build_app
 
     monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv(
@@ -869,13 +871,13 @@ def test_coordinator_freeze_blocked_after_hook_deadline(
         def _fake_hook() -> None:
             monotonic.now = 200.0
 
-        monkeypatch.setattr(
-            finalization_service, "_capture_final", _fake_capture
+        test_app = build_app(
+            capture_runner=worker.InlineCaptureRunner(_fake_capture),
+            publication_hook=_fake_hook,
+            monotonic=monotonic,
         )
-        monkeypatch.setattr(
-            finalization_service, "_PUBLICATION_HOOK", _fake_hook
-        )
-        monkeypatch.setattr(finalization_service, "_MONOTONIC", monotonic)
+
+    with TestClient(test_app) as client:
         response = client.post("/v1/events", json=event)
 
     assert response.status_code == 400
@@ -1033,8 +1035,7 @@ def test_freeze_revalidates_deadline_after_lock_before_write(
 
     from fastapi.testclient import TestClient
 
-    import crucible_core.services.finalizations as finalization_service
-    from crucible_core.main import app
+    from crucible_core.main import app, build_app
 
     monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv(
@@ -1069,12 +1070,12 @@ def test_freeze_revalidates_deadline_after_lock_before_write(
                 changes=[],
             )
 
-        monkeypatch.setattr(
-            finalization_service, "_capture_final", _fake_capture
+        test_app = build_app(
+            capture_runner=worker.InlineCaptureRunner(_fake_capture),
+            monotonic=_advancing_monotonic,
         )
-        monkeypatch.setattr(
-            finalization_service, "_MONOTONIC", _advancing_monotonic
-        )
+
+    with TestClient(test_app) as client:
         response = client.post("/v1/events", json=event)
 
     assert response.status_code == 400
@@ -1109,8 +1110,7 @@ def test_freeze_expiry_inside_transaction_before_persist_rolls_back(
     from fastapi.testclient import TestClient
 
     import crucible_core.application.finalizations as finalizations_app
-    import crucible_core.services.finalizations as finalization_service
-    from crucible_core.main import app
+    from crucible_core.main import app, build_app
 
     monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv(
@@ -1144,15 +1144,17 @@ def test_freeze_expiry_inside_transaction_before_persist_rolls_back(
                 changes=[],
             )
 
-        monkeypatch.setattr(
-            finalization_service, "_capture_final", _fake_capture
+        test_app = build_app(
+            capture_runner=worker.InlineCaptureRunner(_fake_capture),
+            monotonic=monotonic,
         )
-        monkeypatch.setattr(finalization_service, "_MONOTONIC", monotonic)
         monkeypatch.setattr(
             finalizations_app.final_repo,
             "publication_is_current",
             _advance_during_lock,
         )
+
+    with TestClient(test_app) as client:
         response = client.post("/v1/events", json=event)
 
     assert response.status_code == 400
@@ -1247,8 +1249,7 @@ def test_freeze_exact_deadline_is_expired(
 
     from fastapi.testclient import TestClient
 
-    import crucible_core.services.finalizations as finalization_service
-    from crucible_core.main import app
+    from crucible_core.main import app, build_app
 
     monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv(
@@ -1284,12 +1285,12 @@ def test_freeze_exact_deadline_is_expired(
                 changes=[],
             )
 
-        monkeypatch.setattr(
-            finalization_service, "_capture_final", _fake_capture
+        test_app = build_app(
+            capture_runner=worker.InlineCaptureRunner(_fake_capture),
+            monotonic=_exact_monotonic,
         )
-        monkeypatch.setattr(
-            finalization_service, "_MONOTONIC", _exact_monotonic
-        )
+
+    with TestClient(test_app) as client:
         response = client.post("/v1/events", json=event)
 
     assert response.status_code == 400
@@ -1319,8 +1320,7 @@ def test_freeze_advancing_to_limit_after_inserts_rolls_back(
     from fastapi.testclient import TestClient
 
     import crucible_core.application.finalizations as finalizations_app
-    import crucible_core.services.finalizations as finalization_service
-    from crucible_core.main import app
+    from crucible_core.main import app, build_app
     from crucible_core.schemas.persistence import (
         BaselineFileRow,
         TaskFileChangeRow,
@@ -1382,15 +1382,17 @@ def test_freeze_advancing_to_limit_after_inserts_rolls_back(
                 ],
             )
 
-        monkeypatch.setattr(
-            finalization_service, "_capture_final", _fake_capture
+        test_app = build_app(
+            capture_runner=worker.InlineCaptureRunner(_fake_capture),
+            monotonic=monotonic,
         )
-        monkeypatch.setattr(finalization_service, "_MONOTONIC", monotonic)
         monkeypatch.setattr(
             finalizations_app.final_repo,
             "insert_baseline_file",
             _advance_on_insert,
         )
+
+    with TestClient(test_app) as client:
         response = client.post("/v1/events", json=event)
 
     assert response.status_code == 400
@@ -1424,8 +1426,7 @@ def test_freeze_update_advancing_to_deadline_rolls_back(
 
     from fastapi.testclient import TestClient
 
-    import crucible_core.services.finalizations as finalization_service
-    from crucible_core.main import app
+    from crucible_core.main import app, build_app
 
     monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv(
@@ -1461,12 +1462,12 @@ def test_freeze_update_advancing_to_deadline_rolls_back(
                 changes=[],
             )
 
-        monkeypatch.setattr(
-            finalization_service, "_capture_final", _fake_capture
+        test_app = build_app(
+            capture_runner=worker.InlineCaptureRunner(_fake_capture),
+            monotonic=_advancing_after_update,
         )
-        monkeypatch.setattr(
-            finalization_service, "_MONOTONIC", _advancing_after_update
-        )
+
+    with TestClient(test_app) as client:
         response = client.post("/v1/events", json=event)
 
     assert response.status_code == 400
@@ -1623,8 +1624,7 @@ def test_freeze_lock_waits_within_deadline_budget(
 
     from fastapi.testclient import TestClient
 
-    import crucible_core.services.finalizations as finalization_service
-    from crucible_core.main import app
+    from crucible_core.main import app, build_app
 
     monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv(
@@ -1651,9 +1651,6 @@ def test_freeze_lock_waits_within_deadline_budget(
                 return 104.9
             return 105.0
 
-        monkeypatch.setattr(
-            finalization_service, "_MONOTONIC", _lock_aware_monotonic
-        )
         db_path = tmp_path / "data" / "crucible.db"
 
         def _fake_capture(*args, **kwargs):
@@ -1666,10 +1663,12 @@ def test_freeze_lock_waits_within_deadline_budget(
                 changes=[],
             )
 
-        monkeypatch.setattr(
-            finalization_service, "_capture_final", _fake_capture
+        test_app = build_app(
+            capture_runner=worker.InlineCaptureRunner(_fake_capture),
+            monotonic=_lock_aware_monotonic,
         )
 
+    with TestClient(test_app) as client:
         # Hold the write lock on a dedicated thread so only
         # _freeze's BEGIN IMMEDIATE contends (_begin already
         # committed). The hold outlives the ~100ms deadline-aware
@@ -1767,13 +1766,15 @@ def test_freeze_sub_ms_remainder_rounds_busy_timeout_up(
     monkeypatch.setattr(finalizations_app, "connect", _FakeConnect)
     coordinator = finalizations_app.FinalizationCoordinator(
         tmp_path / "crucible.db",
-        capture_final=lambda *a, **k: FinalCaptureSnapshot(
-            head="h",
-            branch="b",
-            status=b"",
-            index=b"",
-            baseline_files=[],
-            changes=[],
+        capture_runner=worker.InlineCaptureRunner(
+            lambda *a, **k: FinalCaptureSnapshot(
+                head="h",
+                branch="b",
+                status=b"",
+                index=b"",
+                baseline_files=[],
+                changes=[],
+            )
         ),
         monotonic=_scripted_monotonic,
     )

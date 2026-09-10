@@ -5,6 +5,7 @@ import gzip
 import math
 import sqlite3
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
@@ -12,9 +13,6 @@ from typing import Any, Callable
 from crucible_core.core.database import connect
 from crucible_core.core.errors import FinalizationError, ProjectError
 from crucible_core.infrastructure.git import final_capture_worker as worker
-from crucible_core.infrastructure.git.final_capture import (
-    capture_final as _canonical_capture_final,
-)
 from crucible_core.repositories import finalizations_repository as final_repo
 from crucible_core.repositories import sessions_repository as sessions_repo
 from crucible_core.repositories import tasks_repository as tasks_repo
@@ -22,6 +20,7 @@ from crucible_core.schemas.admissions import EventRequest
 from crucible_core.schemas.finalizations import (
     BeginFinalizationResult,
     BeginReplayed,
+    FinalCaptureRequest,
     FinalCaptureSnapshot,
 )
 from crucible_core.schemas.persistence import (
@@ -134,35 +133,52 @@ def _parse_utc_timestamp(value: object, code: str) -> datetime:
     return parsed.astimezone(UTC)
 
 
+@dataclass(frozen=True)
+class EventHashContext:
+    event: EventRequest
+    payload_hash: str
+
+
+def _is_transient_lock(error: Exception) -> bool:
+    return isinstance(error, sqlite3.OperationalError) and (
+        "locked" in str(error).lower() or "busy" in str(error).lower()
+    )
+
+
 class FinalizationCoordinator:
     def __init__(
         self,
         database_path: Path,
         *,
-        capture_final: Callable[..., FinalCaptureSnapshot],
+        capture_runner: worker.CaptureRunner | None = None,
         publication_hook: Callable[[], None] | None = None,
         clock: Callable[[], datetime] | None = None,
         max_authorization_window_seconds: int | None = None,
         monotonic: Callable[[], float] | None = None,
+        patch_hook: Callable[[], None] | None = None,
     ) -> None:
         self._database_path = database_path
-        self._capture_final = capture_final
+        self._runner = capture_runner or worker.get_default_runner()
         self._publication_hook = publication_hook
         self._clock = clock or (lambda: datetime.now(UTC))
         self._max_window_seconds = max_authorization_window_seconds
         self._monotonic = monotonic or time.monotonic
+        self._patch_hook = patch_hook
 
-    def complete(self, event: EventRequest) -> dict[str, object]:
+    def complete(
+        self, event: EventRequest, payload_hash: str | None = None
+    ) -> dict[str, object]:
         event_id = str(event.event_id)
-        payload_hash = canonical_json_sha256(
-            event.model_dump(mode="json", exclude_none=True)
-        )
+        if payload_hash is None:
+            payload_hash = canonical_json_sha256(
+                event.model_dump(mode="json", exclude_none=True)
+            )
         self._validate_event(event)
 
         with connect(self._database_path) as connection:
             existing = final_repo.get_finalization_event(connection, event_id)
             if existing is not None:
-                return self._reconcile(event_id, payload_hash, existing)
+                return self._reconcile(event_id, payload_hash, existing, event)
 
         task_id = self._task_id(event)
         not_after = _parse_utc_timestamp(
@@ -187,172 +203,120 @@ class FinalizationCoordinator:
             return self._abort_expired(event, task_id, payload_hash)
 
         deadline = self._monotonic() + FINAL_CAPTURE_DEADLINE_SECONDS
-        use_worker = self._capture_final is _canonical_capture_final
+        runner = self._runner
         key: Any = None
-        if use_worker:
-            # begin->registry stays atomic under the shared boundary
-            # lock; the lock is never held during Git capture (wait).
-            _pre_generation: int | None = None
-            try:
-                with worker.BOUNDARY_LOCK:
-                    try:
-                        begun = self._begin(
-                            event, task_id, payload_hash, not_after
-                        )
-                    except sqlite3.IntegrityError:
-                        with connect(self._database_path) as connection:
-                            existing = final_repo.get_finalization_event(
-                                connection, event_id
-                            )
-                            if existing is None:
-                                raise
-                            return self._reconcile(
-                                event_id, payload_hash, existing
-                            )
-                    if isinstance(begun, BeginReplayed):
-                        return begun.response
-                    generation, task, input_row_id = (
-                        begun.generation,
-                        begun.task,
-                        begun.input_row_id,
-                    )
-                    _pre_generation = int(generation)
-                    try:
-                        project = resolve_project(event.git_root)
-                    except ProjectError as error:
-                        raise FinalizationError(str(error)) from error
-                    if project.id != str(event.project_id):
-                        raise FinalizationError("PROJECT_ID_MISMATCH")
-                    with connect(self._database_path) as connection:
-                        baseline_files = tasks_repo.list_task_baseline_files(
-                            connection, task_id
-                        )
-                    # Child enforces its own absolute deadline on its
-                    # own monotonic clock; translate the remaining
-                    # parent budget so injected parent clocks stay
-                    # deterministic.
-                    remaining = max(0.001, deadline - self._monotonic())
-                    from crucible_core.schemas.finalizations import (
-                        FinalCaptureRequest,
-                    )
-
-                    request = FinalCaptureRequest(
-                        git_root=str(task.git_root),
-                        baseline_head=str(task.baseline_head),
-                        baseline_branch=str(task.baseline_branch),
-                        baseline_index=bytes(task.baseline_index_manifest),
-                        baseline_files=list(baseline_files),
-                        max_file_size_bytes=int(
-                            project.max_snapshot_file_size_bytes
-                        ),
-                        deadline_monotonic=time.monotonic() + remaining,
-                    )
-                    key = worker.spawn_capture(
-                        request,
-                        str(task.tree_id),
-                        int(generation),
-                        task_id,
-                    )
-            except FinalizationError as pre_error:
-                if _pre_generation is not None:
-                    try:
-                        self._fail(
-                            task_id,
-                            _pre_generation,
-                            pre_error.code,
-                        )
-                    except Exception:
-                        pass
-                raise
-            except Exception:
-                if _pre_generation is not None:
-                    try:
-                        self._fail(
-                            task_id,
-                            _pre_generation,
-                            "FINALIZATION_FAILED",
-                        )
-                    except Exception:
-                        pass
-                    raise FinalizationError(
-                        "FINALIZATION_FAILED", 500
-                    ) from None
-                raise
-        else:
-            try:
-                begun = self._begin(event, task_id, payload_hash, not_after)
-            except sqlite3.IntegrityError:
-                with connect(self._database_path) as connection:
-                    existing = final_repo.get_finalization_event(
-                        connection, event_id
-                    )
-                    if existing is None:
-                        raise
-                    return self._reconcile(event_id, payload_hash, existing)
-            if isinstance(begun, BeginReplayed):
-                return begun.response
-            generation, task, input_row_id = (
-                begun.generation,
-                begun.task,
-                begun.input_row_id,
-            )
-            # resolve_project performs Git reads, so it must only run after
-            # _begin's transaction has rechecked the capture window and
-            # consumed the authorization; a project failure here fails the
-            # task instead of letting capture run.
-            try:
-                project = resolve_project(event.git_root)
-            except ProjectError as error:
-                raise FinalizationError(str(error)) from error
-            if project.id != str(event.project_id):
-                raise FinalizationError("PROJECT_ID_MISMATCH")
-
-            with connect(self._database_path) as connection:
-                baseline_files = tasks_repo.list_task_baseline_files(
-                    connection, task_id
-                )
+        # Single begin -> prepare -> start path for real and fake
+        # runners. Begin, project/baseline preparation and registry
+        # start stay atomic under the shared boundary lock; the
+        # lock is never held during Git capture (wait).
+        _pre_generation: int | None = None
         try:
-            if use_worker:
+            with runner.boundary_lock:
                 try:
-                    snapshot = worker.wait_capture(
-                        key, deadline, self._monotonic
+                    begun = self._begin(
+                        event, task_id, payload_hash, not_after
                     )
-                except FinalizationError as wait_error:
-                    if (
-                        wait_error.code in _FENCE_SUPERSEDED_WORKER_CODES
-                        and self._was_fenced(
-                            task_id, str(task.tree_id), int(generation)
+                except sqlite3.IntegrityError:
+                    with connect(self._database_path) as connection:
+                        existing = final_repo.get_finalization_event(
+                            connection, event_id
                         )
-                    ):
-                        raise FinalizationError(
-                            "STALE_CAPTURE_GENERATION", 409
-                        ) from wait_error
-                    raise
-            else:
-                snapshot = self._capture_final(
-                    Path(task.git_root),
-                    task.baseline_head,
-                    task.baseline_branch,
-                    task.baseline_index_manifest,
-                    baseline_files,
-                    project.max_snapshot_file_size_bytes,
-                    deadline,
+                        if existing is None:
+                            raise
+                        return self._reconcile(
+                            event_id, payload_hash, existing, event
+                        )
+                if isinstance(begun, BeginReplayed):
+                    return begun.response
+                generation, task, input_row_id = (
+                    begun.generation,
+                    begun.task,
+                    begun.input_row_id,
                 )
+                _pre_generation = int(generation)
+                try:
+                    project = resolve_project(event.git_root)
+                except ProjectError as error:
+                    raise FinalizationError(str(error)) from error
+                if project.id != str(event.project_id):
+                    raise FinalizationError("PROJECT_ID_MISMATCH")
+                with connect(self._database_path) as connection:
+                    baseline_files = tasks_repo.list_task_baseline_files(
+                        connection, task_id
+                    )
+                # Child enforces its own absolute deadline on its
+                # own monotonic clock; translate the remaining
+                # parent budget so injected parent clocks stay
+                # deterministic.
+                remaining = max(0.001, deadline - self._monotonic())
+                request = FinalCaptureRequest(
+                    git_root=str(task.git_root),
+                    baseline_head=str(task.baseline_head),
+                    baseline_branch=str(task.baseline_branch),
+                    baseline_index=bytes(task.baseline_index_manifest),
+                    baseline_files=list(baseline_files),
+                    max_file_size_bytes=int(
+                        project.max_snapshot_file_size_bytes
+                    ),
+                    deadline_monotonic=time.monotonic() + remaining,
+                )
+                key = runner.spawn_capture(
+                    request,
+                    str(task.tree_id),
+                    int(generation),
+                    task_id,
+                )
+        except FinalizationError as pre_error:
+            if _pre_generation is not None:
+                try:
+                    self._fail(
+                        task_id,
+                        _pre_generation,
+                        pre_error.code,
+                    )
+                except Exception:
+                    pass
+            raise
+        except Exception:
+            if _pre_generation is not None:
+                try:
+                    self._fail(
+                        task_id,
+                        _pre_generation,
+                        "FINALIZATION_FAILED",
+                    )
+                except Exception:
+                    pass
+                raise FinalizationError("FINALIZATION_FAILED", 500) from None
+            raise
+        try:
+            try:
+                snapshot = runner.wait_capture(key, deadline, self._monotonic)
+            except FinalizationError as wait_error:
+                if (
+                    wait_error.code in _FENCE_SUPERSEDED_WORKER_CODES
+                    and self._was_fenced(
+                        task_id, str(task.tree_id), int(generation)
+                    )
+                ):
+                    raise FinalizationError(
+                        "STALE_CAPTURE_GENERATION", 409
+                    ) from wait_error
+                raise
             if self._monotonic() >= deadline:
                 raise FinalizationError("FINAL_SNAPSHOT_TIMEOUT")
             if self._publication_hook is not None:
                 self._publication_hook()
             if self._monotonic() >= deadline:
                 raise FinalizationError("FINAL_SNAPSHOT_TIMEOUT")
-            # Only the parent freezes/materializes from SQLite authority;
-            # a late worker result can never publish once
-            # publication_is_current/fence rejects it.
+            # Only the parent freezes/materializes from SQLite
+            # authority; a late runner result can never publish
+            # once publication_is_current/fence rejects it.
             self._freeze(task_id, task.tree_id, generation, snapshot, deadline)
             self.materialize(task_id)
         except FinalizationError as error:
             if (
-                use_worker
-                and error.code in _FENCE_SUPERSEDED_WORKER_CODES
+                error.code in _FENCE_SUPERSEDED_WORKER_CODES
                 and self._was_fenced(
                     task_id, str(task.tree_id), int(generation)
                 )
@@ -361,20 +325,33 @@ class FinalizationCoordinator:
                 raise FinalizationError(
                     "STALE_CAPTURE_GENERATION", 409
                 ) from error
-            if use_worker and error.code == worker.IPC_FAILED_CODE:
-                # Broken IPC without a fence: internal code never leaks;
-                # map to the public worker-failure contract.
+            if error.code == worker.IPC_FAILED_CODE:
+                # Broken IPC without a fence: internal code never
+                # leaks; map to the public worker-failure contract.
                 self._fail(task_id, generation, "FINALIZATION_FAILED")
                 raise FinalizationError("FINALIZATION_FAILED", 500) from error
-            if use_worker and error.code == worker.WAIT_TIMEOUT_CODE:
-                # Parent-side timeout without a fence: internal code
-                # never leaks; map to the public timeout contract.
+            if error.code == worker.WAIT_TIMEOUT_CODE:
+                # Parent-side timeout without a fence: internal
+                # code never leaks; map to the public contract.
                 self._fail(task_id, generation, "FINAL_SNAPSHOT_TIMEOUT")
                 raise FinalizationError("FINAL_SNAPSHOT_TIMEOUT") from error
+            if _is_transient_lock(error):
+                raise
             self._fail(task_id, generation, error.code)
             raise
-        except Exception:
-            self._fail(task_id, generation, "FINALIZATION_FAILED")
+        except Exception as error:
+            if _is_transient_lock(error):
+                # Writer/busy during freeze/materialize is
+                # retryable: leave the task finalizing so
+                # recovery can retry; never convert a lock
+                # into a definitive corruption/failure.
+                raise FinalizationError(
+                    "FINALIZATION_IN_PROGRESS", 409
+                ) from error
+            try:
+                self._fail(task_id, generation, "FINALIZATION_FAILED")
+            except Exception:
+                pass
             raise FinalizationError("FINALIZATION_FAILED", 500) from None
 
         return {
@@ -386,17 +363,20 @@ class FinalizationCoordinator:
             "dispatch_authorized": False,
         }
 
-    def abort(self, event: EventRequest) -> dict[str, object]:
+    def abort(
+        self, event: EventRequest, payload_hash: str | None = None
+    ) -> dict[str, object]:
         event_id = str(event.event_id)
-        payload_hash = canonical_json_sha256(
-            event.model_dump(mode="json", exclude_none=True)
-        )
+        if payload_hash is None:
+            payload_hash = canonical_json_sha256(
+                event.model_dump(mode="json", exclude_none=True)
+            )
         self._validate_abort_event(event)
 
         with connect(self._database_path) as connection:
             existing = final_repo.get_finalization_event(connection, event_id)
             if existing is not None:
-                return self._reconcile(event_id, payload_hash, existing)
+                return self._reconcile(event_id, payload_hash, existing, event)
 
         task_id = self._task_id(event)
         reason = self._abort_reason(event)
@@ -409,7 +389,9 @@ class FinalizationCoordinator:
                 )
                 if duplicate is not None:
                     connection.rollback()
-                    return self._reconcile(event_id, payload_hash, duplicate)
+                    return self._reconcile(
+                        event_id, payload_hash, duplicate, event
+                    )
                 task = tasks_repo.get_finalization_task(connection, task_id)
                 if task is None:
                     connection.rollback()
@@ -432,21 +414,15 @@ class FinalizationCoordinator:
                 if not aborted:
                     connection.rollback()
                     raise FinalizationError("TASK_NOT_RUNNING", 409)
-                connection.execute(
-                    "INSERT INTO inbound_events (id, payload_hash, status, "
-                    "event_type, received_at, outcome, input_id, task_id, "
-                    "failure_code, failure_message) VALUES (?, ?, "
-                    "'rejected', 'task_finalization_aborted', ?, 'rejected', "
-                    "?, ?, ?, ?)",
-                    (
-                        event_id,
-                        payload_hash,
-                        now,
-                        stored.id,
-                        task_id,
-                        reason,
-                        reason,
-                    ),
+                final_repo.insert_abort_event(
+                    connection,
+                    event_id,
+                    payload_hash,
+                    now,
+                    stored.id,
+                    task_id,
+                    reason,
+                    self._legacy_hash(event),
                 )
                 connection.commit()
             except sqlite3.IntegrityError:
@@ -458,7 +434,7 @@ class FinalizationCoordinator:
                     if existing_retry is None:
                         raise
                     return self._reconcile(
-                        event_id, payload_hash, existing_retry
+                        event_id, payload_hash, existing_retry, event
                     )
             return {
                 "event_id": event_id,
@@ -485,7 +461,10 @@ class FinalizationCoordinator:
                 connection.rollback()
                 return BeginReplayed(
                     response=self._reconcile(
-                        str(event.event_id), payload_hash, duplicate
+                        str(event.event_id),
+                        payload_hash,
+                        duplicate,
+                        event,
                     )
                 )
             task = tasks_repo.get_finalization_task(connection, task_id)
@@ -520,18 +499,16 @@ class FinalizationCoordinator:
             )
             if generation is None:
                 raise FinalizationError("STALE_CAPTURE_GENERATION", 409)
-            connection.execute(
-                "INSERT INTO inbound_events (id, payload_hash, status, "
-                "event_type, received_at, outcome, input_id, task_id) "
-                "VALUES (?, ?, 'processing', 'task_completed', ?, "
-                "'finalizing', ?, ?)",
-                (
-                    str(event.event_id),
-                    payload_hash,
-                    utc_now_iso(),
-                    stored.id,
-                    task_id,
-                ),
+            final_repo.insert_processing_event(
+                connection,
+                str(event.event_id),
+                payload_hash,
+                "task_completed",
+                utc_now_iso(),
+                "finalizing",
+                stored.id,
+                task_id,
+                self._legacy_hash(event),
             )
             connection.commit()
             return BeginFinalizationResult(
@@ -552,7 +529,10 @@ class FinalizationCoordinator:
             if duplicate is not None:
                 connection.rollback()
                 return self._reconcile(
-                    str(event.event_id), payload_hash, duplicate
+                    str(event.event_id),
+                    payload_hash,
+                    duplicate,
+                    event,
                 )
             task = tasks_repo.get_finalization_task(connection, task_id)
             if task is None:
@@ -592,21 +572,16 @@ class FinalizationCoordinator:
         if not aborted:
             connection.rollback()
             raise FinalizationError("TASK_NOT_RUNNING", 409)
-        connection.execute(
-            "INSERT INTO inbound_events (id, payload_hash, status, "
-            "event_type, received_at, outcome, input_id, task_id, "
-            "failure_code, failure_message) VALUES (?, ?, "
-            "'rejected', 'task_completed', ?, 'rejected', ?, ?, "
-            "?, ?)",
-            (
-                str(event.event_id),
-                payload_hash,
-                now,
-                input_row_id,
-                task_id,
-                code,
-                code,
-            ),
+        final_repo.insert_rejected_event(
+            connection,
+            str(event.event_id),
+            payload_hash,
+            "task_completed",
+            now,
+            input_row_id,
+            task_id,
+            code,
+            self._legacy_hash(event),
         )
         connection.commit()
         return {
@@ -699,46 +674,84 @@ class FinalizationCoordinator:
             connection.commit()
 
     def materialize(self, task_id: str) -> None:
+        # Phase 1 reads the frozen SQLite evidence and
+        # closes the read connection before any compute,
+        # so no writer is held during patch calculation.
+        # Phase 2 computes patches purely from those DB
+        # blobs (never Git/worktree). Phase 3 publishes
+        # in a short atomic transaction that revalidates
+        # eligibility plus the full materialization
+        # identity (frozen row + baseline/changes blobs).
+        with connect(self._database_path) as connection:
+            snapshot = final_repo.get_materialization_snapshot(
+                connection, task_id
+            )
+        if snapshot is None:
+            return
+        if snapshot.status == "completed":
+            return
+        if (
+            snapshot.status != "finalizing"
+            or snapshot.snapshot_frozen_at is None
+        ):
+            return
+        baseline = {item.path: item for item in snapshot.baseline}
+        computed: dict[str, str | None] = {}
+        ordered: list[str] = []
+        for change in snapshot.changes:
+            if self._patch_hook is not None:
+                self._patch_hook()
+            # Corrupt gzip raises definitively; partial
+            # evidence (hash_only/unsupported) stays None.
+            patch = self._patch(baseline.get(change.path), change)
+            computed[change.path] = patch
+            if patch:
+                ordered.append(patch)
+        task_diff = "".join(ordered)
+        expected = snapshot.identity
+        expected_changes = {
+            item.path: (
+                item.evidence_status,
+                item.final_sha256,
+                item.final_size,
+            )
+            for item in snapshot.changes
+        }
+        now = utc_now_iso()
         with connect(self._database_path) as connection:
             connection.execute("BEGIN IMMEDIATE")
-            state = final_repo.get_frozen_task_state(connection, task_id)
-            if (
-                state is None
-                or state.status != "finalizing"
-                or state.snapshot_frozen_at is None
-            ):
-                connection.rollback()
-                return
-            baseline = {
-                item.path: item
-                for item in tasks_repo.list_task_baseline_files(
-                    connection, task_id
+            try:
+                published = final_repo.publish_materialization_locked(
+                    connection,
+                    task_id,
+                    expected,
+                    expected_changes,
+                    computed,
+                    task_diff,
+                    now,
                 )
-            }
-            changes = tasks_repo.list_task_file_changes(connection, task_id)
-            patches: list[str] = []
-            for change in changes:
-                patch = self._patch(baseline.get(change.path), change)
-                connection.execute(
-                    "UPDATE task_file_changes SET patch = ?, "
-                    "materialized_at = ? WHERE task_id = ? AND path = ?",
-                    (patch, utc_now_iso(), task_id, change.path),
-                )
-                if patch:
-                    patches.append(patch)
-            connection.execute(
-                "UPDATE tasks SET status = 'completed', task_diff = ?, "
-                "completed_at = ? WHERE id = ? AND status = 'finalizing' "
-                "AND snapshot_frozen_at IS NOT NULL",
-                ("".join(patches), utc_now_iso(), task_id),
+            except Exception:
+                try:
+                    connection.rollback()
+                except sqlite3.Error:
+                    pass
+                raise
+            if published:
+                connection.commit()
+            else:
+                try:
+                    connection.rollback()
+                except sqlite3.Error:
+                    pass
+        if published:
+            return
+        with connect(self._database_path) as connection:
+            state = final_repo.get_finalization_task_status(
+                connection, task_id
             )
-            connection.execute(
-                "UPDATE inbound_events SET status = 'accepted', "
-                "outcome = 'completed' WHERE task_id = ? "
-                "AND event_type = 'task_completed' AND status = 'processing'",
-                (task_id,),
-            )
-            connection.commit()
+        if state is None or state == "completed":
+            return
+        raise FinalizationError("STALE_CAPTURE_GENERATION", 409)
 
     def recover(self) -> None:
         with connect(self._database_path) as connection:
@@ -747,6 +760,25 @@ class FinalizationCoordinator:
             if entry.snapshot_frozen_at is not None:
                 try:
                     self.materialize(entry.task_id)
+                except sqlite3.OperationalError as error:
+                    if _is_transient_lock(error):
+                        continue
+                    self._fail(
+                        entry.task_id,
+                        None,
+                        "FINAL_MATERIALIZATION_FAILED",
+                    )
+                except FinalizationError as error:
+                    if error.code in (
+                        "STALE_CAPTURE_GENERATION",
+                        "FINALIZATION_IN_PROGRESS",
+                    ):
+                        continue
+                    self._fail(
+                        entry.task_id,
+                        None,
+                        error.code,
+                    )
                 except Exception:
                     self._fail(
                         entry.task_id,
@@ -757,13 +789,21 @@ class FinalizationCoordinator:
                 self._fail(entry.task_id, None, "FINAL_SNAPSHOT_NOT_FROZEN")
 
     def fence_unfrozen(self, tree_id: str) -> int:
-        with connect(self._database_path) as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            generation = final_repo.fence_finalization(
-                connection, tree_id, utc_now_iso()
-            )
-            connection.commit()
-            return generation
+        # Fence stays under the shared boundary lock so it is atomic
+        # against begin->start; the DB fence stays authoritative and
+        # worker cancellation is best-effort after commit.
+        with self._runner.boundary_lock:
+            with connect(self._database_path) as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                generation = final_repo.fence_finalization(
+                    connection, tree_id, utc_now_iso()
+                )
+                connection.commit()
+        try:
+            self._runner.cancel_tree_captures(tree_id)
+        except Exception:
+            pass
+        return generation
 
     def _validate_event(self, event: EventRequest) -> None:
         if event.event_type != "task_completed":
@@ -892,6 +932,20 @@ class FinalizationCoordinator:
         except Exception:
             return False
 
+    def _frozen_generation(self, task_id: str) -> int | None:
+        # Geração já disponível na linha/snapshot da frozen
+        # task; sem nova transição ou inferência.
+        try:
+            with connect(self._database_path) as connection:
+                snapshot = final_repo.get_materialization_snapshot(
+                    connection, task_id
+                )
+        except Exception:
+            return None
+        if snapshot is None:
+            return None
+        return snapshot.identity.capture_generation
+
     def _fail(self, task_id: str, generation: int | None, code: str) -> None:
         with connect(self._database_path) as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -913,17 +967,53 @@ class FinalizationCoordinator:
         self, baseline: BaselineFileRow | None, change: TaskFileChangeRow
     ) -> str | None:
         if change.evidence_status != "complete":
+            # Honest partial evidence carries no patch;
+            # completion stays allowed with partial flag.
             return None
-        before = (
-            gzip.decompress(baseline.content).decode("utf-8", "replace")
-            if baseline is not None and baseline.content is not None
-            else ""
-        )
-        after = (
-            gzip.decompress(change.final_content).decode("utf-8", "replace")
-            if change.final_content is not None
-            else ""
-        )
+        # A missing blob is only legitimate on the absent
+        # side (added has no baseline, deleted has no
+        # final). Any other missing/corrupt blob with
+        # complete evidence fails definitively instead of
+        # collapsing to None plus a completed task.
+        if baseline is None:
+            if change.operation != "added":
+                raise FinalizationError("FINAL_MATERIALIZATION_FAILED", 500)
+            before_raw = b""
+        elif baseline.content is None:
+            raise FinalizationError("FINAL_MATERIALIZATION_FAILED", 500)
+        else:
+            try:
+                before_raw = gzip.decompress(baseline.content)
+            except (OSError, EOFError) as error:
+                raise FinalizationError(
+                    "FINAL_MATERIALIZATION_FAILED", 500
+                ) from error
+        if change.final_content is None:
+            if change.operation != "deleted":
+                raise FinalizationError("FINAL_MATERIALIZATION_FAILED", 500)
+            after_raw = b""
+        else:
+            try:
+                after_raw = gzip.decompress(change.final_content)
+            except (OSError, EOFError) as error:
+                raise FinalizationError(
+                    "FINAL_MATERIALIZATION_FAILED", 500
+                ) from error
+        # No truncation: SQLite generation is the
+        # authority, so the full unified diff publishes.
+        # Strict decode: valid gzip holding non-UTF-8
+        # bytes is not honest text evidence (binary goes
+        # hash_only per capture, never complete). A
+        # replacement-char patch would adulterate frozen
+        # evidence, so undecodable blobs fail
+        # definitively instead of completing as complete.
+        try:
+            before = before_raw.decode("utf-8")
+            after = after_raw.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise FinalizationError(
+                "FINAL_MATERIALIZATION_FAILED", 500
+            ) from error
         return "".join(
             difflib.unified_diff(
                 before.splitlines(keepends=True),
@@ -933,15 +1023,98 @@ class FinalizationCoordinator:
             )
         )
 
+    def _legacy_hash(self, event: EventRequest) -> str:
+        return canonical_json_sha256(
+            event.model_dump(mode="json", exclude_none=True)
+        )
+
+    def _stored_matches(
+        self,
+        event: EventRequest,
+        incoming_transport: str,
+        row: FinalizationEventRow,
+    ) -> bool:
+        if row.payload_hash == incoming_transport:
+            return True
+        incoming_semantic = self._legacy_hash(event)
+        if row.semantic_hash is not None:
+            return row.semantic_hash == incoming_semantic
+        return row.payload_hash == incoming_semantic
+
     def _reconcile(
         self,
         event_id: str,
         payload_hash: str,
         row: FinalizationEventRow,
+        event: EventRequest,
     ) -> dict[str, object]:
-        if row.payload_hash != payload_hash:
+        context = EventHashContext(event=event, payload_hash=payload_hash)
+        if not self._stored_matches(context.event, context.payload_hash, row):
             raise FinalizationError("IDEMPOTENCY_CONFLICT", 409)
         if row.status in ("processing", "received"):
+            # Frozen-finalizing retry: an idempotent replay of the
+            # same task_completed retries only SQLite evidence
+            # materialization (no Git recapture, no runner). Locks
+            # e conflitos transitórios ficam 409 sem _fail; erros
+            # definitivos terminalizam via _fail como no fluxo
+            # inicial. Scoped to this task only -- never global.
+            if event.event_type == "task_completed" and row.task_id:
+                try:
+                    self.materialize(row.task_id)
+                except FinalizationError as error:
+                    if error.code in _RETRYABLE_CONFLICT_CODES:
+                        raise
+                    # Erro definitivo: espelha o fluxo inicial e
+                    # terminaliza a frozen task (sem Git/recover).
+                    # _fail é atômico com a resposta: se persistir
+                    # falhar com lock, devolve 409 retryable em vez
+                    # de mascarar como definitivo.
+                    generation = self._frozen_generation(row.task_id)
+                    try:
+                        self._fail(
+                            row.task_id,
+                            generation,
+                            error.code,
+                        )
+                    except Exception as fail_error:
+                        if _is_transient_lock(fail_error):
+                            raise FinalizationError(
+                                "FINALIZATION_IN_PROGRESS", 409
+                            ) from fail_error
+                        raise fail_error from error
+                    raise
+                except Exception as error:
+                    if _is_transient_lock(error):
+                        raise FinalizationError(
+                            "FINALIZATION_IN_PROGRESS", 409
+                        ) from error
+                    generation = self._frozen_generation(row.task_id)
+                    try:
+                        self._fail(
+                            row.task_id,
+                            generation,
+                            "FINALIZATION_FAILED",
+                        )
+                    except Exception as fail_error:
+                        if _is_transient_lock(fail_error):
+                            raise FinalizationError(
+                                "FINALIZATION_IN_PROGRESS", 409
+                            ) from fail_error
+                        raise fail_error from error
+                    raise FinalizationError(
+                        "FINALIZATION_FAILED", 500
+                    ) from error
+                with connect(self._database_path) as connection:
+                    updated = final_repo.get_finalization_event(
+                        connection, event_id
+                    )
+                if updated is not None and updated.status not in (
+                    "processing",
+                    "received",
+                ):
+                    return self._reconcile(
+                        event_id, payload_hash, updated, event
+                    )
             raise FinalizationError("FINALIZATION_IN_PROGRESS", 409)
         if row.status == "rejected":
             if row.failure_code == "CAPTURE_AUTHORIZATION_EXPIRED":

@@ -10,9 +10,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 import crucible_core.infrastructure.git.final_capture as final_capture
-import crucible_core.services.finalizations as finalization_service
 from crucible_core.core.errors import FinalizationError
-from crucible_core.main import app
+from crucible_core.infrastructure.git import (
+    final_capture_worker as worker,
+)
+from crucible_core.main import app, build_app
 from crucible_core.schemas.finalizations import FinalCaptureSnapshot
 from crucible_core.schemas.persistence import (
     TaskFileChangeRow,
@@ -252,36 +254,36 @@ def test_committed_symlink_no_follow_via_api(monkeypatch, tmp_path):
     row = final_capture._symlink_row("link.txt", "  ", link_bytes, 1024)
     assert row.sha256 == hashlib.sha256(link_bytes).hexdigest()
     assert gzip.decompress(bytes(row.content)) == link_bytes
-    with TestClient(app) as client:
-        task_id = admit(client, project_id, root)
 
+    def _structural(*args, **kwargs):
         # Worktree cannot materialize the symlink here; inject the honest
         # structural capture through the public finalization API.
-        def _structural(*args, **kwargs):
-            return FinalCaptureSnapshot(
-                head="h",
-                branch="b",
-                status=b"",
-                index=b"manifest",
-                baseline_files=[],
-                changes=[
-                    TaskFileChangeRow(
-                        path="link.txt",
-                        operation="added",
-                        final_status="  ",
-                        final_sha256=row.sha256,
-                        final_size=row.size,
-                        final_is_binary=0,
-                        final_content=row.content,
-                        evidence_status="unsupported",
-                        evidence_reason="SYMLINK_TARGET",
-                    )
-                ],
-            )
-
-        monkeypatch.setattr(
-            finalization_service, "_capture_final", _structural
+        return FinalCaptureSnapshot(
+            head="h",
+            branch="b",
+            status=b"",
+            index=b"manifest",
+            baseline_files=[],
+            changes=[
+                TaskFileChangeRow(
+                    path="link.txt",
+                    operation="added",
+                    final_status="  ",
+                    final_sha256=row.sha256,
+                    final_size=row.size,
+                    final_is_binary=0,
+                    final_content=row.content,
+                    evidence_status="unsupported",
+                    evidence_reason="SYMLINK_TARGET",
+                )
+            ],
         )
+
+    test_app = build_app(
+        capture_runner=worker.InlineCaptureRunner(_structural)
+    )
+    with TestClient(test_app) as client:
+        task_id = admit(client, project_id, root)
         response = client.post(
             "/v1/events", json=completion(project_id, root, task_id)
         )
@@ -393,7 +395,33 @@ def test_gitlink_structural_via_api(monkeypatch, tmp_path):
     assert b"160000" in status
     entry = final_capture._TreeEntry(mode="160000", kind="commit")
     assert final_capture._reason_for_entry(entry) == "GITLINK_CONTENT"
-    with TestClient(app) as client:
+
+    def _structural(*args, **kwargs):
+        return FinalCaptureSnapshot(
+            head="h",
+            branch="b",
+            status=b"",
+            index=b"manifest",
+            baseline_files=[],
+            changes=[
+                TaskFileChangeRow(
+                    path="submod",
+                    operation="added",
+                    final_status="  ",
+                    final_sha256=None,
+                    final_size=None,
+                    final_is_binary=None,
+                    final_content=None,
+                    evidence_status="unsupported",
+                    evidence_reason="GITLINK_CONTENT",
+                )
+            ],
+        )
+
+    test_app = build_app(
+        capture_runner=worker.InlineCaptureRunner(_structural)
+    )
+    with TestClient(test_app) as client:
         task_id = admit(client, project_id, root)
         subprocess.run(
             [
@@ -405,32 +433,6 @@ def test_gitlink_structural_via_api(monkeypatch, tmp_path):
                 "submod",
             ],
             check=True,
-        )
-
-        def _structural(*args, **kwargs):
-            return FinalCaptureSnapshot(
-                head="h",
-                branch="b",
-                status=b"",
-                index=b"manifest",
-                baseline_files=[],
-                changes=[
-                    TaskFileChangeRow(
-                        path="submod",
-                        operation="added",
-                        final_status="  ",
-                        final_sha256=None,
-                        final_size=None,
-                        final_is_binary=None,
-                        final_content=None,
-                        evidence_status="unsupported",
-                        evidence_reason="GITLINK_CONTENT",
-                    )
-                ],
-            )
-
-        monkeypatch.setattr(
-            finalization_service, "_capture_final", _structural
         )
         response = client.post(
             "/v1/events", json=completion(project_id, root, task_id)
@@ -504,35 +506,35 @@ def test_unavailable_fails_before_freeze_via_api(monkeypatch, tmp_path):
     monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
     root = tmp_path / "repo"
     project_id = initialized_repository(root)
-    with TestClient(app) as client:
+
+    def _unavailable(*args, **kwargs):
+        return FinalCaptureSnapshot(
+            head="h",
+            branch="b",
+            status=b"",
+            index=b"manifest",
+            baseline_files=[],
+            changes=[
+                TaskFileChangeRow(
+                    path="tracked.txt",
+                    operation="modified",
+                    final_status=" M",
+                    final_sha256=None,
+                    final_size=None,
+                    final_is_binary=None,
+                    final_content=None,
+                    evidence_status="unavailable",
+                    evidence_reason="BASELINE_OBJECT_MISSING",
+                )
+            ],
+        )
+
+    test_app = build_app(
+        capture_runner=worker.InlineCaptureRunner(_unavailable)
+    )
+    with TestClient(test_app) as client:
         task_id = admit(client, project_id, root)
         (root / "tracked.txt").write_text("after\n", encoding="utf-8")
-
-        def _unavailable(*args, **kwargs):
-            return FinalCaptureSnapshot(
-                head="h",
-                branch="b",
-                status=b"",
-                index=b"manifest",
-                baseline_files=[],
-                changes=[
-                    TaskFileChangeRow(
-                        path="tracked.txt",
-                        operation="modified",
-                        final_status=" M",
-                        final_sha256=None,
-                        final_size=None,
-                        final_is_binary=None,
-                        final_content=None,
-                        evidence_status="unavailable",
-                        evidence_reason="BASELINE_OBJECT_MISSING",
-                    )
-                ],
-            )
-
-        monkeypatch.setattr(
-            finalization_service, "_capture_final", _unavailable
-        )
         response = client.post(
             "/v1/events", json=completion(project_id, root, task_id)
         )
@@ -835,7 +837,13 @@ def test_migration_preserves_legacy_nulls_and_writes_structural(tmp_path):
     def _upgrade(path, revision: str) -> None:
         config = Config()
         config.set_main_option(
-            "script_location", "src/crucible_core/migrations"
+            "script_location",
+            str(
+                Path(__file__).resolve().parents[1]
+                / "src"
+                / "crucible_core"
+                / "migrations"
+            ),
         )
         engine = create_engine(f"sqlite:///{path.as_posix()}")
         with engine.begin() as connection:

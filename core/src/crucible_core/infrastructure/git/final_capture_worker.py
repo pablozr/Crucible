@@ -16,7 +16,286 @@ from crucible_core.schemas.finalizations import (
     FinalCaptureSnapshot,
 )
 
-BOUNDARY_LOCK: threading.RLock = threading.RLock()
+
+class CaptureRunner:
+    """Minimal internal runner interface for final capture."""
+
+    @property
+    def boundary_lock(self) -> threading.RLock:
+        raise NotImplementedError
+
+    def spawn_capture(
+        self,
+        request: FinalCaptureRequest,
+        tree_id: str,
+        generation: int,
+        task_id: str,
+    ) -> CaptureKey:
+        raise NotImplementedError
+
+    def wait_capture(
+        self,
+        key: CaptureKey,
+        deadline: float,
+        monotonic: Callable[[], float] | None = None,
+    ) -> FinalCaptureSnapshot:
+        raise NotImplementedError
+
+    def snapshot_tree_keys(self, tree_id: str) -> list[CaptureKey]:
+        raise NotImplementedError
+
+    def cancel_capture(self, key: CaptureKey) -> bool:
+        raise NotImplementedError
+
+    def cancel_tree_captures(self, tree_id: str) -> int:
+        raise NotImplementedError
+
+    def shutdown(self) -> None:
+        raise NotImplementedError
+
+
+class ProcessCaptureRunner(CaptureRunner):
+    """Real spawn-based runner owning its lock and registry."""
+
+    def __init__(self) -> None:
+        self._lock: threading.RLock = threading.RLock()
+        self._registry: dict[CaptureKey, _RunningCapture] = {}
+
+    @property
+    def boundary_lock(self) -> threading.RLock:
+        return self._lock
+
+    @property
+    def registry(self) -> dict[CaptureKey, _RunningCapture]:
+        return self._registry
+
+    def spawn_capture(
+        self,
+        request: FinalCaptureRequest,
+        tree_id: str,
+        generation: int,
+        task_id: str,
+    ) -> CaptureKey:
+        key: CaptureKey = (tree_id, generation)
+        parent_conn, child_conn = _CTX.Pipe(duplex=False)
+        process = _CTX.Process(
+            target=final_capture_worker_main,
+            args=(child_conn, request),
+        )
+        with self._lock:
+            self._registry[key] = _RunningCapture(
+                tree_id=tree_id,
+                generation=generation,
+                task_id=task_id,
+                process=process,
+                conn=parent_conn,
+            )
+            try:
+                process.start()
+            except Exception:
+                current = self._registry.get(key)
+                if current is not None and current.process is process:
+                    self._registry.pop(key, None)
+                try:
+                    parent_conn.close()
+                except Exception:
+                    pass
+                try:
+                    child_conn.close()
+                except Exception:
+                    pass
+                raise
+            try:
+                child_conn.close()
+            except Exception:
+                pass
+            return key
+
+    def snapshot_tree_keys(self, tree_id: str) -> list[CaptureKey]:
+        with self._lock:
+            return [key for key in self._registry if key[0] == tree_id]
+
+    def wait_capture(
+        self,
+        key: CaptureKey,
+        deadline: float,
+        monotonic: Callable[[], float] | None = None,
+    ) -> FinalCaptureSnapshot:
+        tick = monotonic or time.monotonic
+        with self._lock:
+            handle = self._registry.get(key)
+        if handle is None:
+            raise FinalizationError("STALE_CAPTURE_GENERATION", 409)
+        try:
+            remaining = deadline - tick()
+            if remaining <= 0:
+                _terminate_and_join(handle.process)
+                raise FinalizationError(WAIT_TIMEOUT_CODE)
+            try:
+                ready = handle.conn.poll(remaining)
+            except Exception as error:
+                _terminate_and_join(handle.process)
+                raise FinalizationError(IPC_FAILED_CODE, 500) from error
+            if not ready:
+                _terminate_and_join(handle.process)
+                raise FinalizationError(WAIT_TIMEOUT_CODE)
+            try:
+                envelope = handle.conn.recv()
+            except Exception as error:
+                _terminate_and_join(handle.process)
+                if tick() >= deadline:
+                    raise FinalizationError(WAIT_TIMEOUT_CODE) from error
+                raise FinalizationError(IPC_FAILED_CODE, 500) from error
+            try:
+                handle.process.join(timeout=1)
+            except Exception:
+                pass
+            if handle.process.is_alive():
+                _terminate_and_join(handle.process)
+            if not isinstance(envelope, FinalCaptureEnvelope):
+                raise FinalizationError(IPC_FAILED_CODE, 500)
+            if not envelope.ok or envelope.snapshot is None:
+                raise FinalizationError(
+                    envelope.error_code or "FINALIZATION_FAILED",
+                    envelope.error_status or 400,
+                )
+            if tick() >= deadline:
+                raise FinalizationError(WAIT_TIMEOUT_CODE)
+            return envelope.snapshot
+        finally:
+            with self._lock:
+                self._registry.pop(key, None)
+            try:
+                handle.conn.close()
+            except Exception:
+                pass
+            try:
+                handle.process.join(timeout=1)
+            except Exception:
+                pass
+
+    def cancel_capture(self, key: CaptureKey) -> bool:
+        with self._lock:
+            handle = self._registry.pop(key, None)
+        if handle is None:
+            return False
+        try:
+            _terminate_and_join(handle.process)
+        finally:
+            try:
+                handle.conn.close()
+            except Exception:
+                pass
+        return True
+
+    def cancel_tree_captures(self, tree_id: str) -> int:
+        with self._lock:
+            keys = [key for key in self._registry if key[0] == tree_id]
+        count = 0
+        for key in keys:
+            try:
+                if self.cancel_capture(key):
+                    count += 1
+            except Exception:
+                continue
+        return count
+
+    def shutdown(self) -> None:
+        with self._lock:
+            keys = list(self._registry.keys())
+        for key in keys:
+            try:
+                self.cancel_capture(key)
+            except Exception:
+                continue
+
+
+@dataclass
+class _InlineEntry:
+    tree_id: str
+    generation: int
+    task_id: str
+    request: FinalCaptureRequest
+
+
+class InlineCaptureRunner(CaptureRunner):
+    """Synchronous fake runner for tests and inline capture.
+
+    Spawn only registers under the boundary lock; wait runs
+    the wrapped capture callable outside the lock so fences
+    can cancel/observe the key concurrently.
+    """
+
+    def __init__(self, capture: Callable[..., FinalCaptureSnapshot]) -> None:
+        self._capture = capture
+        self._lock: threading.RLock = threading.RLock()
+        self._registry: dict[CaptureKey, _InlineEntry] = {}
+
+    @property
+    def boundary_lock(self) -> threading.RLock:
+        return self._lock
+
+    def spawn_capture(
+        self,
+        request: FinalCaptureRequest,
+        tree_id: str,
+        generation: int,
+        task_id: str,
+    ) -> CaptureKey:
+        key: CaptureKey = (tree_id, generation)
+        with self._lock:
+            self._registry[key] = _InlineEntry(
+                tree_id=tree_id,
+                generation=generation,
+                task_id=task_id,
+                request=request,
+            )
+            return key
+
+    def snapshot_tree_keys(self, tree_id: str) -> list[CaptureKey]:
+        with self._lock:
+            return [key for key in self._registry if key[0] == tree_id]
+
+    def wait_capture(
+        self,
+        key: CaptureKey,
+        deadline: float,
+        monotonic: Callable[[], float] | None = None,
+    ) -> FinalCaptureSnapshot:
+        with self._lock:
+            entry = self._registry.get(key)
+        if entry is None:
+            raise FinalizationError("STALE_CAPTURE_GENERATION", 409)
+        try:
+            request = entry.request
+            return self._capture(
+                Path(request.git_root),
+                request.baseline_head,
+                request.baseline_branch,
+                request.baseline_index,
+                list(request.baseline_files),
+                request.max_file_size_bytes,
+                deadline,
+            )
+        finally:
+            with self._lock:
+                self._registry.pop(key, None)
+
+    def cancel_capture(self, key: CaptureKey) -> bool:
+        with self._lock:
+            return self._registry.pop(key, None) is not None
+
+    def cancel_tree_captures(self, tree_id: str) -> int:
+        with self._lock:
+            keys = [key for key in self._registry if key[0] == tree_id]
+            for key in keys:
+                self._registry.pop(key, None)
+            return len(keys)
+
+    def shutdown(self) -> None:
+        with self._lock:
+            self._registry.clear()
+
 
 _CTX = multiprocessing.get_context("spawn")
 
@@ -50,9 +329,6 @@ class _RunningCapture:
     task_id: str
     process: Any
     conn: Any
-
-
-_REGISTRY: dict[CaptureKey, _RunningCapture] = {}
 
 
 def final_capture_worker_main(
@@ -114,63 +390,12 @@ def final_capture_worker_main(
             pass
 
 
-def spawn_capture(
-    request: FinalCaptureRequest,
-    tree_id: str,
-    generation: int,
-    task_id: str,
-) -> CaptureKey:
-    """Reserve (tree, generation) and start the child atomically.
-
-    Registry insertion and ``Process.start`` run inside a single
-    ``BOUNDARY_LOCK`` critical section, so a fence racing on another
-    thread can never cancel/remove an unstarted handle and observe a
-    later ``start``: either the worker is fully started before the
-    fence snapshots it (and is then cancelled), or the fence snapshot
-    lands first and the worker belongs to a newer generation begun
-    afterwards. A ``start`` failure removes only our own entry and
-    closes both pipe ends without ever starting the child after a
-    cancel. Callers must NOT hold the lock across wait (Git capture).
-    """
-    key: CaptureKey = (tree_id, generation)
-    parent_conn, child_conn = _CTX.Pipe(duplex=False)
-    process = _CTX.Process(
-        target=final_capture_worker_main,
-        args=(child_conn, request),
-    )
-    with BOUNDARY_LOCK:
-        _REGISTRY[key] = _RunningCapture(
-            tree_id=tree_id,
-            generation=generation,
-            task_id=task_id,
-            process=process,
-            conn=parent_conn,
-        )
-        try:
-            process.start()
-        except Exception:
-            current = _REGISTRY.get(key)
-            if current is not None and current.process is process:
-                _REGISTRY.pop(key, None)
-            try:
-                parent_conn.close()
-            except Exception:
-                pass
-            try:
-                child_conn.close()
-            except Exception:
-                pass
-            raise
-        try:
-            child_conn.close()
-        except Exception:
-            pass
-        return key
+_DEFAULT_RUNNER = ProcessCaptureRunner()
 
 
-def snapshot_tree_keys(tree_id: str) -> list[CaptureKey]:
-    with BOUNDARY_LOCK:
-        return [key for key in _REGISTRY if key[0] == tree_id]
+def get_default_runner() -> ProcessCaptureRunner:
+    """Deliberate fallback for direct calls without lifespan composition."""
+    return _DEFAULT_RUNNER
 
 
 def _terminate_and_join(process: Any) -> None:
@@ -200,108 +425,3 @@ def _terminate_and_join(process: Any) -> None:
                 pass
     except Exception:
         pass
-
-
-def wait_capture(
-    key: CaptureKey,
-    deadline: float,
-    monotonic: Callable[[], float] | None = None,
-) -> FinalCaptureSnapshot:
-    """Wait for snapshot within deadline (spawn+capture+IPC included).
-
-    Parent-observed deadline expiry raises the internal
-    WAIT_TIMEOUT_CODE; broken IPC (recv EOF on a killed/cancelled
-    child, invalid envelope payload) raises the internal
-    IPC_FAILED_CODE -- never a genuine envelope error code, not even
-    a child-side FINAL_SNAPSHOT_TIMEOUT, which travels untouched in
-    the envelope. The late result, if any, is discarded;
-    publication_is_current/fence in SQLite remains the publication
-    authority.
-    """
-    tick = monotonic or time.monotonic
-    with BOUNDARY_LOCK:
-        handle = _REGISTRY.get(key)
-    if handle is None:
-        raise FinalizationError("STALE_CAPTURE_GENERATION", 409)
-    try:
-        remaining = deadline - tick()
-        if remaining <= 0:
-            _terminate_and_join(handle.process)
-            raise FinalizationError(WAIT_TIMEOUT_CODE)
-        try:
-            ready = handle.conn.poll(remaining)
-        except Exception as error:
-            _terminate_and_join(handle.process)
-            raise FinalizationError(IPC_FAILED_CODE, 500) from error
-        if not ready:
-            _terminate_and_join(handle.process)
-            raise FinalizationError(WAIT_TIMEOUT_CODE)
-        try:
-            envelope = handle.conn.recv()
-        except Exception as error:
-            _terminate_and_join(handle.process)
-            if tick() >= deadline:
-                raise FinalizationError(WAIT_TIMEOUT_CODE) from error
-            raise FinalizationError(IPC_FAILED_CODE, 500) from error
-        try:
-            handle.process.join(timeout=1)
-        except Exception:
-            pass
-        if handle.process.is_alive():
-            _terminate_and_join(handle.process)
-        if not isinstance(envelope, FinalCaptureEnvelope):
-            raise FinalizationError(IPC_FAILED_CODE, 500)
-        if not envelope.ok or envelope.snapshot is None:
-            raise FinalizationError(
-                envelope.error_code or "FINALIZATION_FAILED",
-                envelope.error_status or 400,
-            )
-        if tick() >= deadline:
-            raise FinalizationError(WAIT_TIMEOUT_CODE)
-        return envelope.snapshot
-    finally:
-        with BOUNDARY_LOCK:
-            _REGISTRY.pop(key, None)
-        try:
-            handle.conn.close()
-        except Exception:
-            pass
-        try:
-            handle.process.join(timeout=1)
-        except Exception:
-            pass
-
-
-def cancel_capture(key: CaptureKey) -> bool:
-    """Best-effort terminate/kill/join + reap. Never raises."""
-    with BOUNDARY_LOCK:
-        handle = _REGISTRY.pop(key, None)
-    if handle is None:
-        return False
-    try:
-        _terminate_and_join(handle.process)
-    finally:
-        try:
-            handle.conn.close()
-        except Exception:
-            pass
-    return True
-
-
-def cancel_tree_captures(tree_id: str) -> int:
-    """Cancel/reap every worker for a tree. DB fence stays authoritative."""
-    with BOUNDARY_LOCK:
-        keys = [key for key in _REGISTRY if key[0] == tree_id]
-    count = 0
-    for key in keys:
-        try:
-            if cancel_capture(key):
-                count += 1
-        except Exception:
-            continue
-    return count
-
-
-def clear_registry_for_tests() -> None:
-    with BOUNDARY_LOCK:
-        _REGISTRY.clear()
