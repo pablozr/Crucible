@@ -148,9 +148,11 @@ def list_tasks(
     return {"tasks": tasks, "next_cursor": next_cursor}
 
 
-def get_task(database_path: Path, task_id: str) -> dict[str, object] | None:
+def get_task(
+    database_path: Path, task_id: str, include_diff: bool = True
+) -> dict[str, object] | None:
     with connect(database_path) as connection:
-        row = tasks_repo.get_task_row(connection, task_id)
+        row = tasks_repo.get_task_row(connection, task_id, include_diff)
         if not row:
             return None
         inputs = [

@@ -221,8 +221,16 @@ def tasks(
 
 
 @router.get("/tasks/{task_id}", response_model=ResponseEnvelope[TaskData])
-def task(request: Request, task_id: UUID) -> ResponseEnvelope[TaskData]:
-    result = get_task(request.app.state.settings.database_path, str(task_id))
+def task(
+    request: Request,
+    task_id: UUID,
+    include_diff: bool = Query(default=True),
+) -> ResponseEnvelope[TaskData]:
+    result = get_task(
+        request.app.state.settings.database_path,
+        str(task_id),
+        include_diff,
+    )
     if not result:
         raise ProblemError("TASK_NOT_FOUND", 404)
     body = TaskDetail.model_validate(result)

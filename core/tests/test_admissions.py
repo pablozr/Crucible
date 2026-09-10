@@ -361,3 +361,55 @@ def test_pure_no_input_outcome_mapping():
         decisions.decide_no_input_outcome("steer_without_active_task")
         == "steer_rejection"
     )
+
+
+def _seed_task_diff(tmp_path, task_id, diff):
+    connection = sqlite3.connect(tmp_path / "data" / "crucible.db")
+    try:
+        connection.execute(
+            "UPDATE tasks SET task_diff = ? WHERE id = ?",
+            (diff, task_id),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def test_task_detail_include_diff_false_returns_null(monkeypatch, tmp_path):
+    monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
+    project_id = initialized_repository(tmp_path / "repo")
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/events", json=candidate(project_id, tmp_path / "repo")
+        )
+        assert response.status_code == 200, response.text
+        task_id = response.json()["data"]["event"]["task_id"]
+        _seed_task_diff(tmp_path, task_id, "SENTINEL-DIFF")
+
+        omitted = client.get(f"/v1/tasks/{task_id}?include_diff=false")
+        assert omitted.status_code == 200, omitted.text
+        omitted_task = omitted.json()["data"]["task"]
+        assert omitted_task["task_diff"] is None
+        assert omitted_task["id"] == task_id
+
+        included = client.get(f"/v1/tasks/{task_id}?include_diff=true")
+        assert included.status_code == 200, included.text
+        assert included.json()["data"]["task"]["task_diff"] == "SENTINEL-DIFF"
+
+
+def test_task_detail_default_include_diff_preserves_diff(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
+    project_id = initialized_repository(tmp_path / "repo")
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/events", json=candidate(project_id, tmp_path / "repo")
+        )
+        assert response.status_code == 200, response.text
+        task_id = response.json()["data"]["event"]["task_id"]
+        _seed_task_diff(tmp_path, task_id, "SENTINEL-DIFF")
+
+        default = client.get(f"/v1/tasks/{task_id}")
+        assert default.status_code == 200, default.text
+        assert default.json()["data"]["task"]["task_diff"] == "SENTINEL-DIFF"

@@ -242,9 +242,16 @@ def list_inputs_by_task_ids(
 
 
 def get_task_row(
-    connection: sqlite3.Connection, task_id: str
+    connection: sqlite3.Connection,
+    task_id: str,
+    include_diff: bool = True,
 ) -> TaskDetailRow | None:
     connection.row_factory = sqlite3.Row
+    diff_select = (
+        "tasks.task_diff AS task_diff, "
+        if include_diff
+        else "NULL AS task_diff, "
+    )
     row = connection.execute(
         "SELECT tasks.id AS id, tasks.status AS status, "
         "tasks.started_at AS started_at, "
@@ -261,7 +268,7 @@ def get_task_row(
         "tasks.final_status AS final_status, "
         "tasks.final_index_manifest AS final_index_manifest, "
         "tasks.snapshot_frozen_at AS snapshot_frozen_at, "
-        "tasks.task_diff AS task_diff, "
+        f"{diff_select}"
         "tasks.evidence_completeness AS evidence_completeness, "
         "tasks.execution_id AS execution_id, "
         "tasks.terminal_signal AS terminal_signal, "
