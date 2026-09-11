@@ -22,7 +22,7 @@
 //   only warned), plus strict aggregate-layout checks on <dir>: exactly the 5
 //   expected tarballs for the product version, a SHA256SUMS file whose
 //   entries match the recomputed file hashes, and an inspection of the packed
-//   CLI manifest proving the package name is @pablozrrrr/cli and the
+//   CLI manifest proving the package name is @pablozrrrr/crucible-cli and the
 //   `workspace:` source pins were converted to exact optionalDependencies
 //   pins. NOTE: this mode checks file names, hashes, and
 //   the packed CLI manifest only; other package
@@ -36,12 +36,12 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const REPO_URL = "git+https://github.com/pablozr/Crucible.git";
-const CLI_PACKAGE_NAME = "@pablozrrrr/cli";
+const CLI_PACKAGE_NAME = "@pablozrrrr/crucible-cli";
 
 const RUNTIMES = [
   {
     target: "win32-x64",
-    packageName: "@pablozrrrr/core-win32-x64",
+    packageName: "@pablozrrrr/crucible-core-win32-x64",
     dir: "packages/core-win32-x64",
     os: ["win32"],
     cpu: ["x64"],
@@ -49,7 +49,7 @@ const RUNTIMES = [
   },
   {
     target: "darwin-x64",
-    packageName: "@pablozrrrr/core-darwin-x64",
+    packageName: "@pablozrrrr/crucible-core-darwin-x64",
     dir: "packages/core-darwin-x64",
     os: ["darwin"],
     cpu: ["x64"],
@@ -57,7 +57,7 @@ const RUNTIMES = [
   },
   {
     target: "darwin-arm64",
-    packageName: "@pablozrrrr/core-darwin-arm64",
+    packageName: "@pablozrrrr/crucible-core-darwin-arm64",
     dir: "packages/core-darwin-arm64",
     os: ["darwin"],
     cpu: ["arm64"],
@@ -65,7 +65,7 @@ const RUNTIMES = [
   },
   {
     target: "linux-x64-gnu",
-    packageName: "@pablozrrrr/core-linux-x64-gnu",
+    packageName: "@pablozrrrr/crucible-core-linux-x64-gnu",
     dir: "packages/core-linux-x64-gnu",
     os: ["linux"],
     cpu: ["x64"],

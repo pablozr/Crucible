@@ -58,8 +58,8 @@ function usage() {
     "Usage: node scripts/smoke-packed-install.mjs [options]",
     "",
     "Options:",
-    "  --cli-tarball <path>      Local @pablozrrrr/cli tarball (default: pnpm pack packages/cli)",
-    "  --runtime-tarball <path>  Local @pablozrrrr/core-<target> tarball (default: npm pack the host package)",
+    "  --cli-tarball <path>      Local @pablozrrrr/crucible-cli tarball (default: pnpm pack packages/cli)",
+    "  --runtime-tarball <path>  Local @pablozrrrr/crucible-core-<target> tarball (default: npm pack the host package)",
     "  --timeout-ms <n>          Max wait for core status (default 90000)",
     "  --keep-temp               Keep the temp dir for inspection on success",
   ].join("\n");
@@ -178,7 +178,7 @@ function pnpmViaCorepackJs() {
 }
 
 /**
- * Pack @pablozrrrr/cli with pnpm (never npm): source optionalDependencies use
+ * Pack @pablozrrrr/crucible-cli with pnpm (never npm): source optionalDependencies use
  * the workspace: protocol, which npm pack keeps verbatim in the tarball
  * while pnpm pack rewrites to the exact version. Dependency vendoring and
  * the runtime tarball stay on npm pack. pnpm pack prints a human-readable
@@ -231,15 +231,15 @@ function assertCliTarballOptionalDepsExact(tarballPath) {
   const manifest = readTarballPackageJson(tarballPath);
   const optional = manifest.optionalDependencies ?? {};
   const expected = {
-    "@pablozrrrr/core-win32-x64": "0.1.0",
-    "@pablozrrrr/core-darwin-x64": "0.1.0",
-    "@pablozrrrr/core-darwin-arm64": "0.1.0",
-    "@pablozrrrr/core-linux-x64-gnu": "0.1.0",
+    "@pablozrrrr/crucible-core-win32-x64": "0.1.0",
+    "@pablozrrrr/crucible-core-darwin-x64": "0.1.0",
+    "@pablozrrrr/crucible-core-darwin-arm64": "0.1.0",
+    "@pablozrrrr/crucible-core-linux-x64-gnu": "0.1.0",
   };
   for (const [name, version] of Object.entries(expected)) {
     if (optional[name] !== version) {
       throw new Error(
-        `CLI tarball ${tarballPath} has optionalDependencies[${JSON.stringify(name)}] = ${JSON.stringify(optional[name])}, want ${JSON.stringify(version)} (pack @pablozrrrr/cli with pnpm so workspace: is rewritten).`,
+        `CLI tarball ${tarballPath} has optionalDependencies[${JSON.stringify(name)}] = ${JSON.stringify(optional[name])}, want ${JSON.stringify(version)} (pack @pablozrrrr/crucible-cli with pnpm so workspace: is rewritten).`,
       );
     }
   }
@@ -277,16 +277,16 @@ async function vendorWorkspaceDepTarballs(outDir) {
 
 function hostRuntimePackage() {
   if (process.platform === "win32" && process.arch === "x64") {
-    return { dir: join(WORKSPACE_ROOT, "packages", "core-win32-x64"), name: "@pablozrrrr/core-win32-x64" };
+    return { dir: join(WORKSPACE_ROOT, "packages", "core-win32-x64"), name: "@pablozrrrr/crucible-core-win32-x64" };
   }
   if (process.platform === "darwin" && process.arch === "x64") {
-    return { dir: join(WORKSPACE_ROOT, "packages", "core-darwin-x64"), name: "@pablozrrrr/core-darwin-x64" };
+    return { dir: join(WORKSPACE_ROOT, "packages", "core-darwin-x64"), name: "@pablozrrrr/crucible-core-darwin-x64" };
   }
   if (process.platform === "darwin" && process.arch === "arm64") {
-    return { dir: join(WORKSPACE_ROOT, "packages", "core-darwin-arm64"), name: "@pablozrrrr/core-darwin-arm64" };
+    return { dir: join(WORKSPACE_ROOT, "packages", "core-darwin-arm64"), name: "@pablozrrrr/crucible-core-darwin-arm64" };
   }
   if (process.platform === "linux" && process.arch === "x64") {
-    return { dir: join(WORKSPACE_ROOT, "packages", "core-linux-x64-gnu"), name: "@pablozrrrr/core-linux-x64-gnu" };
+    return { dir: join(WORKSPACE_ROOT, "packages", "core-linux-x64-gnu"), name: "@pablozrrrr/crucible-core-linux-x64-gnu" };
   }
   throw new Error(`No local runtime package for ${process.platform}-${process.arch}. Pass --runtime-tarball explicitly.`);
 }
@@ -553,12 +553,12 @@ async function main() {
     );
     if (/npm warn/i.test(install.stderr)) log(`npm warnings:\n${install.stderr.trim()}`);
 
-    const cliDir = join(prefix, "node_modules", "@pablozrrrr", "cli");
+    const cliDir = join(prefix, "node_modules", "@pablozrrrr", "crucible-cli");
     const cliEntry = join(cliDir, "dist", "index.js");
     const cliPkgPath = join(cliDir, "package.json");
     if (!existsSync(cliEntry)) throw new Error(`Installed CLI entry missing at ${cliEntry}.`);
     const cliPkg = JSON.parse(readFileSync(cliPkgPath, "utf8"));
-    log(`installed @pablozrrrr/cli ${cliPkg.version}`);
+    log(`installed @pablozrrrr/crucible-cli ${cliPkg.version}`);
     for (const [name, spec] of Object.entries(depSpecs)) {
       if (cliPkg.dependencies?.[name] !== spec) {
         throw new Error(

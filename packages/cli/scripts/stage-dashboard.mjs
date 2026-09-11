@@ -1,6 +1,6 @@
 // Stages built dashboard assets into packages/cli/dashboard.
 // Source of truth: packages/dashboard/dist/dashboard/browser (produced by
-// `pnpm --filter @pablozrrrr/dashboard build`). Runs explicitly after tsc via
+// `pnpm --filter @pablozrrrr/crucible-dashboard build`). Runs explicitly after tsc via
 // the CLI build script. Fails with an actionable error when assets are absent.
 import { cpSync, existsSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -14,7 +14,7 @@ const marker = join(source, "index.html");
 if (!existsSync(marker)) {
   console.error(
     `Dashboard assets are missing at ${source} (expected index.html). ` +
-      `Run "pnpm --filter @pablozrrrr/dashboard build" first, then rebuild the CLI.`,
+      `Run "pnpm --filter @pablozrrrr/crucible-dashboard build" first, then rebuild the CLI.`,
   );
   process.exit(1);
 }

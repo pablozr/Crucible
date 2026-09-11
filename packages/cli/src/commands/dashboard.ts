@@ -34,7 +34,7 @@ export type DashboardDeps = {
 
 export function resolveNgBin(): string {
   throw new Error(
-    'Dashboard no longer uses Angular CLI. Build the dashboard with "pnpm --filter @pablozrrrr/dashboard build" and rebuild the CLI so assets are staged under packages/cli/dashboard.',
+    'Dashboard no longer uses Angular CLI. Build the dashboard with "pnpm --filter @pablozrrrr/crucible-dashboard build" and rebuild the CLI so assets are staged under packages/cli/dashboard.',
   );
 }
 

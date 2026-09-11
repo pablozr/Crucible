@@ -105,7 +105,7 @@ export function resolveCore(deps: CoreExecutableDeps = {}): ResolvedCore {
     throw new Error(
       `Could not locate optional package ${packageName} for target ${target}. ` +
         `The CLI was likely installed with optional dependencies omitted. ` +
-        `Reinstall with "npm install -g @pablozrrrr/cli" (do not pass --omit=optional).`,
+        `Reinstall with "npm install -g @pablozrrrr/crucible-cli" (do not pass --omit=optional).`,
     );
   }
 

@@ -1,4 +1,4 @@
-# @pablozrrrr/adapters
+# @pablozrrrr/crucible-adapters
 
 OpenCode V1 dispatch adapter. Sends one `input_candidate` event to the
 loopback Core, waits for the durable admission outcome, then dispatches.
@@ -21,9 +21,9 @@ contract.
 No live runtime required.
 
 ```sh
-pnpm --filter @pablozrrrr/adapters test
-pnpm --filter @pablozrrrr/adapters typecheck
-pnpm --filter @pablozrrrr/adapters build
+pnpm --filter @pablozrrrr/crucible-adapters test
+pnpm --filter @pablozrrrr/crucible-adapters typecheck
+pnpm --filter @pablozrrrr/crucible-adapters build
 ```
 
 ## Opt-in live transport probe
