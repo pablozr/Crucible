@@ -81,25 +81,23 @@ The design prioritizes reliable attribution: one active task per physical workin
 
 ## Getting started
 
-> **Prerelease.** `@crucible/cli` `0.1.0` is not published to npm yet. Once
-> published, install it with `npm install -g @crucible/cli`. Until then, use
-> the source development setup below.
+### Requirements
 
-This is a **source development setup** for the current foundation. You will need Git, a recent Node.js version (22+ recommended), pnpm **10.33.2**, and Python **3.12+**.
+- **Node.js** `>=22.14.0`
+- **Git**, for project initialization and task capture
 
-### 1. Build the CLI
+The installed CLI ships with a bundled local Core runtime for supported platforms, so no Python or virtual environment is needed to run it.
 
-From the repository root:
+### Install
 
 ```sh
-pnpm install
-pnpm build
+npm install -g @crucible/cli
 ```
 
 Initialize an existing Git repository:
 
 ```sh
-node packages/cli/dist/index.js init /path/to/your/repository
+crucible init /path/to/your/repository
 ```
 
 This creates two files at the target repository's Git root:
@@ -112,42 +110,23 @@ This creates two files at the target repository's Git root:
 
 Initialization preserves an existing valid project ID and configuration. Files are created without being staged or committed. Initialization alone does not enable agent tracking.
 
-### 2. Start the local Core (separate terminals)
+### Run
 
-From the repository root, create a Python environment:
-
-```sh
-python -m venv core/.venv
-```
-
-Activate it using the command for your shell:
-
-| Shell | Command |
-| --- | --- |
-| macOS / Linux (bash or zsh) | `source core/.venv/bin/activate` |
-| Windows (PowerShell) | `.\core\.venv\Scripts\Activate.ps1` |
-
-Install the Core (required before `serve`):
-
-```sh
-python -m pip install -e "./core[dev]"
-```
-
-Keep that environment active in each terminal that runs the CLI service commands below. Then, from the repository root, use separate terminals:
+Use separate terminals:
 
 ```sh
 # Terminal A — local service
-node packages/cli/dist/index.js serve
+crucible serve
 
 # Terminal B — service inspection
-node packages/cli/dist/index.js status
-node packages/cli/dist/index.js status --json
+crucible status
+crucible status --json
 
-# Terminal C — dashboard (separate Angular app)
-node packages/cli/dist/index.js dashboard
+# Terminal C — dashboard (separate app)
+crucible dashboard
 ```
 
-`serve` requires `crucible-core` installed and the virtual environment active; it starts the same local service at **`http://127.0.0.1:7331`**. The dashboard is not served by the Core: it runs separately, depends on the workspace dependencies installed with `pnpm install`, and proxies `/v1` to the Core.
+`serve` resolves the bundled Core runtime and starts the local service at **`http://127.0.0.1:7331`**. The dashboard is not served by the Core: it runs separately at **`http://127.0.0.1:4200`** and proxies `/v1` to the Core.
 
 | Endpoint | Purpose |
 | --- | --- |
@@ -169,6 +148,31 @@ crucible/
 ├── CODE_STYLE.md       # Contributor coding conventions
 └── pnpm-workspace.yaml
 ```
+
+### Source setup
+
+Install the workspace dependencies with pnpm **10.33.2** and build the CLI:
+
+```sh
+pnpm install
+pnpm build
+```
+
+Run the built CLI from the repository root:
+
+```sh
+node packages/cli/dist/index.js init /path/to/your/repository
+node packages/cli/dist/index.js serve
+```
+
+Working on the Core requires Python **3.12+**:
+
+```sh
+python -m venv core/.venv
+python -m pip install -e "./core[dev]"
+```
+
+### Checks
 
 Run the checks from the repository root, with the Python environment activated:
 
