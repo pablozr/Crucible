@@ -1,22 +1,40 @@
 .cru-detail-head-row {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   flex-wrap: wrap;
 }
 
+.cru-detail-head-row .cru-mono {
+  color: var(--cru-text-dim);
+  font-size: 13px;
+}
+
 .cru-failure {
-  margin-top: 12px;
-  padding: 10px 12px;
-  border: 1px solid rgba(242, 109, 109, 0.45);
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px solid rgba(242, 109, 109, 0.35);
   border-radius: var(--cru-radius);
-  background: rgba(242, 109, 109, 0.08);
+  background: rgba(242, 109, 109, 0.07);
+}
+
+.cru-failure > strong {
+  color: var(--cru-bad);
+  font-size: 13px;
+}
+
+.cru-failure-msg {
+  margin: 4px 0 0;
+}
+
+.cru-detail-kv {
+  margin-top: 16px;
 }
 
 .cru-detail-grid {
   display: grid;
   grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
-  gap: 12px;
+  gap: 16px;
   align-items: start;
 }
 
@@ -24,7 +42,7 @@
 .cru-detail-side {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 16px;
   min-width: 0;
 }
 

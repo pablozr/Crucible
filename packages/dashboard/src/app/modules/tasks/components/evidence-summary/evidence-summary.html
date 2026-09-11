@@ -8,7 +8,7 @@
       }
     </ul>
   } @else {
-    <p class="cru-muted" style="margin: 0">Not recorded</p>
+    <p class="cru-muted cru-empty-note">Not recorded</p>
   }
 </section>
 
@@ -81,7 +81,7 @@
         aria-label="Baseline index manifest, plain text"
       >{{ t.baseline_index_manifest }}</pre>
     } @else {
-      <p class="cru-muted" style="margin: 8px 0 0">Unavailable</p>
+      <p class="cru-muted cru-manifest-empty">Unavailable</p>
     }
   </details>
   <details class="cru-manifest">
@@ -93,7 +93,7 @@
         aria-label="Final index manifest, plain text"
       >{{ t.final_index_manifest }}</pre>
     } @else {
-      <p class="cru-muted" style="margin: 8px 0 0">Unavailable</p>
+      <p class="cru-muted cru-manifest-empty">Unavailable</p>
     }
   </details>
 </section>
@@ -101,7 +101,7 @@
 <section class="cru-card" aria-label="Baseline files">
   <h2 class="cru-section-title">Baseline files ({{ t.baseline_files.length }})</h2>
   @if (t.baseline_files.length === 0) {
-    <p class="cru-muted" style="margin: 0">Not recorded</p>
+    <p class="cru-muted cru-empty-note">Not recorded</p>
   } @else {
     <ul class="cru-baseline-list">
       @for (file of t.baseline_files; track file.path) {

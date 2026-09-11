@@ -6,18 +6,34 @@
   flex-wrap: wrap;
 }
 
+.cru-list-headings {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
 .cru-title {
   margin: 0;
-  font-size: 20px;
-  letter-spacing: -0.01em;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+}
+
+.cru-list-sub {
+  margin: 0;
+  max-width: 60ch;
+  font-size: 13px;
+  line-height: 1.5;
 }
 
 .cru-list-card {
   padding: 4px 0;
+  overflow: hidden;
 }
 
 .cru-more {
   display: flex;
   justify-content: center;
-  padding: 4px 0 8px;
+  padding: 2px 0 4px;
 }

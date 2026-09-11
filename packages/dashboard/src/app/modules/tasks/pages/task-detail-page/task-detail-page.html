@@ -6,8 +6,8 @@
   @if (loading()) {
     <div class="cru-card" role="status" aria-label="Loading task detail">
       <div class="cru-skeleton">&nbsp;</div>
-      <div class="cru-skeleton" style="margin-top: 8px">&nbsp;</div>
-      <div class="cru-skeleton" style="margin-top: 8px">&nbsp;</div>
+      <div class="cru-skeleton">&nbsp;</div>
+      <div class="cru-skeleton">&nbsp;</div>
     </div>
   } @else if (error() && task() === null) {
     @if (isNotFound()) {
@@ -27,7 +27,7 @@
       @if (t.failure_code || t.failure_message) {
         <div class="cru-failure" role="alert">
           <strong>Failure</strong>
-          <p style="margin: 4px 0 0">
+          <p class="cru-failure-msg">
             @if (t.failure_code) {
               <span class="cru-mono">{{ t.failure_code }}</span>
             }
@@ -37,7 +37,7 @@
           </p>
         </div>
       }
-      <dl class="cru-kv" style="margin-top: 10px">
+      <dl class="cru-kv cru-detail-kv">
         <dt>Started</dt>
         <dd>{{ t.started_at }}</dd>
         <dt>Worktree</dt>

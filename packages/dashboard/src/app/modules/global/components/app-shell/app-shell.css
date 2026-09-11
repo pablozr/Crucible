@@ -13,13 +13,14 @@
   gap: 24px;
   max-width: 1180px;
   margin: 0 auto;
-  padding: 10px 16px;
+  padding: 12px 16px;
 }
 
 .cru-brand {
   display: inline-flex;
-  align-items: baseline;
-  gap: 8px;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
   color: var(--cru-text);
 }
 
@@ -28,21 +29,33 @@
 }
 
 .cru-brand-mark {
+  display: block;
   align-self: center;
-  width: 12px;
-  height: 12px;
-  border-radius: 3px;
-  background: linear-gradient(135deg, var(--cru-accent), var(--cru-accent-cyan));
+  width: 36px;
+  height: 36px;
+  flex: none;
+  border-radius: 10px;
+  object-fit: cover;
+}
+
+.cru-brand-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  line-height: 1.2;
 }
 
 .cru-brand-name {
   font-weight: 700;
-  letter-spacing: 0.01em;
+  font-size: 15px;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
 }
 
 .cru-brand-sub {
   color: var(--cru-text-faint);
-  font-size: 12px;
+  font-size: 11px;
+  white-space: nowrap;
 }
 
 .cru-nav {
@@ -70,5 +83,15 @@
 }
 
 .cru-shell-main {
-  min-height: calc(100dvh - 53px);
+  min-height: calc(100dvh - 60px);
+}
+
+@media (max-width: 560px) {
+  .cru-shell-inner {
+    gap: 12px;
+  }
+
+  .cru-brand-sub {
+    display: none;
+  }
 }

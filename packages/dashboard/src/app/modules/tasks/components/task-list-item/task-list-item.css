@@ -1,14 +1,19 @@
 .cru-row {
   display: block;
-  padding: 12px 14px;
+  padding: 14px 18px;
   border: 1px solid transparent;
   border-bottom-color: var(--cru-border);
   color: inherit;
+  transition: background-color 0.12s ease;
 }
 
 .cru-row:hover {
   text-decoration: none;
   background: var(--cru-bg-raised);
+}
+
+.cru-row:focus-visible {
+  outline-offset: -2px;
 }
 
 .cru-row:last-child {
@@ -25,4 +30,25 @@
 
 .cru-row-id {
   color: var(--cru-accent-cyan);
+  font-size: 13px;
+}
+
+.cru-row .cru-kv {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: 6px;
+  row-gap: 4px;
+}
+
+.cru-row .cru-kv dt {
+  font-size: 12px;
+}
+
+.cru-row .cru-kv dd {
+  margin-right: 14px;
+}
+
+.cru-row .cru-kv dd:last-child {
+  margin-right: 0;
 }

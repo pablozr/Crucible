@@ -1,16 +1,46 @@
+/* Evidence sections read as one flat surface: sibling cards are stitched
+ * into a single bordered block separated by hairlines, avoiding the
+ * boxed-in-boxes feel while keeping the global .cru-card contract intact. */
+:host {
+  display: flex;
+  flex-direction: column;
+}
+
+:host > .cru-card {
+  border-radius: 0;
+}
+
+:host > .cru-card:first-of-type {
+  border-top-left-radius: var(--cru-radius);
+  border-top-right-radius: var(--cru-radius);
+}
+
+:host > .cru-card:last-of-type {
+  border-bottom-left-radius: var(--cru-radius);
+  border-bottom-right-radius: var(--cru-radius);
+}
+
+:host > .cru-card + .cru-card {
+  border-top: 0;
+}
+
 .cru-id-list {
   list-style: none;
   margin: 0;
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 6px;
+}
+
+.cru-empty-note {
+  margin: 0;
 }
 
 .cru-manifest {
-  margin-top: 10px;
+  margin-top: 14px;
   border-top: 1px solid var(--cru-border);
-  padding-top: 10px;
+  padding-top: 12px;
 }
 
 .cru-manifest summary {
@@ -19,14 +49,19 @@
   font-size: 13px;
   color: var(--cru-text-dim);
   border-radius: 4px;
+  transition: color 0.12s ease;
 }
 
 .cru-manifest summary:hover {
   color: var(--cru-text);
 }
 
+.cru-manifest-empty {
+  margin: 8px 0 0;
+}
+
 .cru-manifest .cru-diff {
-  margin-top: 8px;
+  margin-top: 10px;
   max-height: 320px;
 }
 
@@ -39,7 +74,7 @@
 }
 
 .cru-baseline-file {
-  padding: 10px 0;
+  padding: 12px 0;
   border-bottom: 1px solid var(--cru-border);
 }
 
@@ -54,6 +89,6 @@
 
 .cru-baseline-file > .cru-mono {
   display: inline-block;
-  margin-bottom: 6px;
+  margin-bottom: 8px;
   color: var(--cru-text);
 }

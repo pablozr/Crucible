@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="13" fill="#12151C"/>
+  <defs>
+    <linearGradient id="crucibleFaviconAccent" x1="14" y1="16" x2="50" y2="52" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#6D7CFF"/>
+      <stop offset="1" stop-color="#58C7E8"/>
+    </linearGradient>
+  </defs>
+  <g fill="url(#crucibleFaviconAccent)">
+    <rect x="12" y="17" width="42" height="9" rx="4.5"/>
+    <path d="M12 17H8a4.5 4.5 0 0 0 0 9h4z"/>
+    <path d="M25 26h14l-3 15h-8z"/>
+    <rect x="13" y="41" width="38" height="9" rx="4.5"/>
+  </g>
+  <path d="M26 31l5 5 11-13" fill="none" stroke="#E6E9F0" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

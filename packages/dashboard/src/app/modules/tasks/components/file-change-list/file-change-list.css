@@ -7,7 +7,7 @@
 }
 
 .cru-file {
-  padding: 10px 0;
+  padding: 14px 0;
   border-bottom: 1px solid var(--cru-border);
 }
 
@@ -22,15 +22,16 @@
 
 .cru-file-path {
   display: inline-block;
-  margin-bottom: 6px;
+  margin-bottom: 8px;
   color: var(--cru-text);
+  font-size: 13px;
 }
 
-.cru-id-list {
-  list-style: none;
+.cru-file .cru-kv {
+  grid-template-columns: minmax(96px, 120px) 1fr;
+  gap: 4px 12px;
+}
+
+.cru-empty-note {
   margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
 }

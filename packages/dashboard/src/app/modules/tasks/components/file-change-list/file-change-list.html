@@ -1,7 +1,7 @@
 <section class="cru-card" aria-label="Changed files">
   <h2 class="cru-section-title">Changed files ({{ changes().length }})</h2>
   @if (changes().length === 0) {
-    <p class="cru-muted" style="margin: 0">No file evidence recorded.</p>
+    <p class="cru-muted cru-empty-note">No file evidence recorded.</p>
   } @else {
     <ul class="cru-file-list">
       @for (file of changes(); track file.path) {
