@@ -1,14 +1,46 @@
 {
   "name": "@crucible/cli",
-  "private": true,
   "version": "0.1.0",
+  "description": "Crucible CLI — local-first task-level code provenance for coding agents.",
   "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pablozr/Crucible.git",
+    "directory": "packages/cli"
+  },
+  "homepage": "https://github.com/pablozr/Crucible",
+  "bugs": {
+    "url": "https://github.com/pablozr/Crucible/issues"
+  },
+  "engines": {
+    "node": ">=22.14.0"
+  },
   "bin": {
     "crucible": "dist/index.js"
   },
+  "files": [
+    "dist/**",
+    "dashboard/**",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "optionalDependencies": {
+    "@crucible/core-win32-x64": "workspace:0.1.0",
+    "@crucible/core-darwin-x64": "workspace:0.1.0",
+    "@crucible/core-darwin-arm64": "workspace:0.1.0",
+    "@crucible/core-linux-x64-gnu": "workspace:0.1.0"
+  },
+  "dependencies": {
+    "yaml": "^2.8.0"
+  },
   "scripts": {
-    "build": "tsc --project tsconfig.build.json",
+    "build": "node scripts/clean-dist.mjs && tsc --project tsconfig.build.json && node scripts/stage-dashboard.mjs",
     "test": "tsx --test test/**/*.test.ts",
+    "test:packed": "node scripts/smoke-packed-install.mjs",
     "typecheck": "tsc --noEmit"
   }
 }

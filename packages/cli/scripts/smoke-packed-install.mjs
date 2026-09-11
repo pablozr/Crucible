@@ -1,0 +1,515 @@
+// Smoke test for the packed CLI + runtime tarballs without publishing.
+//
+// Usage:
+//   node scripts/smoke-packed-install.mjs [--cli-tarball <path> --runtime-tarball <path>]
+//                                         [--keep-temp] [--timeout-ms <n>]
+//
+// When tarballs are omitted they are produced locally with `pnpm pack` for
+// packages/cli (pnpm rewrites the workspace: optionalDependencies to exact
+// versions; npm pack would keep the workspace: protocol verbatim) and
+// `npm pack` for the host runtime package (win32-x64 on this machine, or
+// --runtime-tarball elsewhere). The script then:
+//   1. Creates an isolated temp npm prefix + cache.
+//   2. Installs those tarballs plus workspace-vendored dependency tarballs
+//      offline with --ignore-scripts (no network, no lifecycle scripts) so
+//      the CLI must resolve the sibling optional runtime package via
+//      createRequire, exactly like a real install.
+//   3. Asserts packed dashboard assets exist and are served by the packed
+//      static handler (no browser, no persistent server).
+//   4. Asserts the packed dist never spawns python/pnpm/npx/ng/tsc.
+//   5. Runs `crucible --version` via process.execPath (no shell, no .bin shims).
+//   6. Runs `crucible serve` with a temp CRUCIBLE_DATA_DIR, polls
+//      /v1/status until healthy, then shuts the child down safely.
+//
+// Temp dirs and child processes are always cleaned up (unless --keep-temp).
+// All spawns use shell: false and process.execPath; npm runs via its bundled
+// npm-cli.js and pnpm runs via Node's bundled corepack pnpm.js so no shell
+// is needed on Windows either (spawning bare `pnpm` with shell: false fails
+// with ENOENT there because only pnpm.CMD exists on PATH).
+import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
+import {
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { createServer } from "node:http";
+import { tmpdir } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { gunzipSync } from "node:zlib";
+
+const CLI_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const WORKSPACE_ROOT = resolve(CLI_ROOT, "..", "..");
+
+const STATUS_URL = "http://127.0.0.1:7331/v1/status";
+// Frozen-binary cold start includes migrations; stay generous but bounded.
+const DEFAULT_TIMEOUT_MS = 90_000;
+const POLL_INTERVAL_MS = 500;
+
+function usage() {
+  return [
+    "Usage: node scripts/smoke-packed-install.mjs [options]",
+    "",
+    "Options:",
+    "  --cli-tarball <path>      Local @crucible/cli tarball (default: pnpm pack packages/cli)",
+    "  --runtime-tarball <path>  Local @crucible/core-<target> tarball (default: npm pack the host package)",
+    "  --timeout-ms <n>          Max wait for core status (default 90000)",
+    "  --keep-temp               Keep the temp dir for inspection on success",
+  ].join("\n");
+}
+
+function parseArgs(argv) {
+  const args = {
+    cliTarball: undefined,
+    runtimeTarball: undefined,
+    timeoutMs: DEFAULT_TIMEOUT_MS,
+    keepTemp: false,
+  };
+  for (let i = 0; i < argv.length; i += 1) {
+    const flag = argv[i];
+    if (flag === "--cli-tarball") args.cliTarball = argv[++i];
+    else if (flag === "--runtime-tarball") args.runtimeTarball = argv[++i];
+    else if (flag === "--timeout-ms") args.timeoutMs = Number(argv[++i]);
+    else if (flag === "--keep-temp") args.keepTemp = true;
+    else if (flag === "--help" || flag === "-h") {
+      console.log(usage());
+      process.exit(0);
+    } else throw new Error(`Unknown argument ${JSON.stringify(flag)}.\n${usage()}`);
+  }
+  if (args.cliTarball === undefined && args.runtimeTarball !== undefined) {
+    throw new Error("Pass --cli-tarball together with --runtime-tarball, or omit both to pack locally.");
+  }
+  if (!Number.isFinite(args.timeoutMs) || args.timeoutMs <= 0) {
+    throw new Error("--timeout-ms must be a positive number.");
+  }
+  return args;
+}
+
+function log(step) {
+  console.log(`[packed-smoke] ${step}`);
+}
+
+/** npm inherits pnpm-set npm_config_* env vars; drop them so the fixture is hermetic. */
+function cleanNpmEnv(env) {
+  const out = { ...env };
+  for (const key of Object.keys(out)) {
+    if (key.startsWith("npm_config_")) delete out[key];
+  }
+  return out;
+}
+
+/** Run a command with shell: false, capturing output; reject on nonzero exit. */
+function runCapture(command, args, options = {}) {
+  return new Promise((promiseResolve, promiseReject) => {
+    const child = spawn(command, args, { shell: false, windowsHide: true, ...options });
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (chunk) => {
+      stdout += String(chunk);
+    });
+    child.stderr?.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+    child.on("error", promiseReject);
+    child.on("close", (code, signal) => {
+      if (code === 0) promiseResolve({ stdout, stderr });
+      else {
+        const detail = (stderr.trim() || stdout.trim() || `signal ${signal}`).slice(-3000);
+        promiseReject(new Error(`${basename(command)} ${args.join(" ")} exited with code ${code}: ${detail}`));
+      }
+    });
+  });
+}
+
+function npmCliJs() {
+  const bundled = join(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
+  if (existsSync(bundled)) return bundled;
+  throw new Error("Cannot locate npm's npm-cli.js next to process.execPath; install Node.js with npm to run the packed smoke.");
+}
+
+async function npmPack(packageDir, outDir) {
+  mkdirSync(outDir, { recursive: true });
+  const { stdout } = await runCapture(
+    process.execPath,
+    [npmCliJs(), "pack", "--pack-destination", outDir, "--silent"],
+    { cwd: packageDir, env: cleanNpmEnv(process.env) },
+  );
+  const file = stdout.trim().split(/\r?\n/).filter(Boolean).at(-1);
+  if (!file) throw new Error(`npm pack produced no output in ${packageDir}.`);
+  return resolve(outDir, file);
+}
+
+/**
+ * Node's bundled corepack shim for pnpm. Spawning bare `pnpm` with
+ * shell: false fails on Windows (ENOENT: only pnpm.CMD is on PATH, which
+ * needs a shell), and `corepack pnpm` would need a shell too, so run the
+ * shim with process.execPath instead. This works on Windows and CI without
+ * depending on a global pnpm command name.
+ */
+function pnpmViaCorepackJs() {
+  const bundled = join(dirname(process.execPath), "node_modules", "corepack", "dist", "pnpm.js");
+  if (existsSync(bundled)) return bundled;
+  throw new Error(
+    "Cannot locate corepack's pnpm.js next to process.execPath; install Node.js with corepack to run the packed smoke.",
+  );
+}
+
+/**
+ * Pack @crucible/cli with pnpm (never npm): source optionalDependencies use
+ * the workspace: protocol, which npm pack keeps verbatim in the tarball
+ * while pnpm pack rewrites to the exact version. Dependency vendoring and
+ * the runtime tarball stay on npm pack. pnpm pack prints a human-readable
+ * report instead of a bare filename, so resolve the new tarball by diffing
+ * the output dir.
+ */
+async function packCli(packageDir, outDir) {
+  mkdirSync(outDir, { recursive: true });
+  const before = new Set(readdirSync(outDir));
+  await runCapture(process.execPath, [pnpmViaCorepackJs(), "pack", "--pack-destination", outDir], {
+    cwd: packageDir,
+    env: { ...cleanNpmEnv(process.env), COREPACK_ENABLE_DOWNLOAD_PROMPT: "0" },
+  });
+  const created = readdirSync(outDir).filter((entry) => entry.endsWith(".tgz") && !before.has(entry));
+  if (created.length !== 1) {
+    throw new Error(`pnpm pack in ${packageDir} produced ${created.length} new tarballs (want exactly 1).`);
+  }
+  return resolve(outDir, created[0]);
+}
+
+/** Read package/package.json straight out of a packed .tgz (stdlib only). */
+function readTarballPackageJson(tarballPath) {
+  let entries;
+  try {
+    entries = gunzipSync(readFileSync(tarballPath));
+  } catch (error) {
+    throw new Error(`Cannot gunzip tarball at ${tarballPath}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  let offset = 0;
+  while (offset + 512 <= entries.length) {
+    const header = entries.subarray(offset, offset + 512);
+    if (header.every((byte) => byte === 0)) break;
+    const name = header.subarray(0, 100).toString("utf8").replace(/\0.*$/s, "");
+    const size = Number.parseInt(header.subarray(124, 136).toString("utf8").replace(/\0.*$/s, "").trim(), 8) || 0;
+    const dataStart = offset + 512;
+    if (name === "package/package.json") {
+      return JSON.parse(entries.subarray(dataStart, dataStart + size).toString("utf8"));
+    }
+    offset = dataStart + Math.ceil(size / 512) * 512;
+  }
+  throw new Error(`package/package.json not found in ${tarballPath}.`);
+}
+
+/**
+ * Fail closed when the CLI tarball still carries the workspace: protocol
+ * (i.e. it was packed with npm instead of pnpm). Applies to locally packed
+ * and --cli-tarball-provided tarballs alike.
+ */
+function assertCliTarballOptionalDepsExact(tarballPath) {
+  const manifest = readTarballPackageJson(tarballPath);
+  const optional = manifest.optionalDependencies ?? {};
+  const expected = {
+    "@crucible/core-win32-x64": "0.1.0",
+    "@crucible/core-darwin-x64": "0.1.0",
+    "@crucible/core-darwin-arm64": "0.1.0",
+    "@crucible/core-linux-x64-gnu": "0.1.0",
+  };
+  for (const [name, version] of Object.entries(expected)) {
+    if (optional[name] !== version) {
+      throw new Error(
+        `CLI tarball ${tarballPath} has optionalDependencies[${JSON.stringify(name)}] = ${JSON.stringify(optional[name])}, want ${JSON.stringify(version)} (pack @crucible/cli with pnpm so workspace: is rewritten).`,
+      );
+    }
+  }
+  log(`CLI tarball optionalDependencies are exact (${Object.values(expected)[0]} x4)`);
+}
+
+/**
+ * Vendor the CLI's runtime dependencies as local tarballs packed from this
+ * workspace (resolved exactly as Node would resolve them here). The fixture
+ * install is offline from an empty cache, so registry deps must arrive as
+ * files — never via the network. This does not mask a missing declaration:
+ * the installed manifest assertion below still fails closed when
+ * packages/cli/package.json omits a dependency.
+ */
+async function vendorWorkspaceDepTarballs(outDir) {
+  const sourcePkg = JSON.parse(readFileSync(join(CLI_ROOT, "package.json"), "utf8"));
+  const specs = sourcePkg.dependencies ?? {};
+  const requireFromCli = createRequire(pathToFileURL(join(CLI_ROOT, "package.json")).href);
+  const tarballs = [];
+  for (const name of Object.keys(specs)) {
+    let sourceDir;
+    try {
+      sourceDir = dirname(requireFromCli.resolve(`${name}/package.json`));
+    } catch {
+      throw new Error(
+        `Cannot resolve CLI dependency ${JSON.stringify(name)} from this workspace; run "pnpm install" first.`,
+      );
+    }
+    const tarball = await npmPack(sourceDir, outDir);
+    log(`vendored dependency ${name}@${specs[name]} from ${sourceDir}`);
+    tarballs.push(tarball);
+  }
+  return { specs, tarballs };
+}
+
+function hostRuntimePackage() {
+  if (process.platform === "win32" && process.arch === "x64") {
+    return { dir: join(WORKSPACE_ROOT, "packages", "core-win32-x64"), name: "@crucible/core-win32-x64" };
+  }
+  if (process.platform === "darwin" && process.arch === "x64") {
+    return { dir: join(WORKSPACE_ROOT, "packages", "core-darwin-x64"), name: "@crucible/core-darwin-x64" };
+  }
+  if (process.platform === "darwin" && process.arch === "arm64") {
+    return { dir: join(WORKSPACE_ROOT, "packages", "core-darwin-arm64"), name: "@crucible/core-darwin-arm64" };
+  }
+  if (process.platform === "linux" && process.arch === "x64") {
+    return { dir: join(WORKSPACE_ROOT, "packages", "core-linux-x64-gnu"), name: "@crucible/core-linux-x64-gnu" };
+  }
+  throw new Error(`No local runtime package for ${process.platform}-${process.arch}. Pass --runtime-tarball explicitly.`);
+}
+
+/** The packed dist must never shell out to a toolchain binary. */
+function assertNoToolchainCalls(distDir) {
+  const pattern =
+    /(spawn|spawnSync|execFile|execFileSync|exec|execSync)\s*\(\s*["'`]([^"'`]*\b(python\d?|pnpm|npx|\bng\b|tsc|ts-node|uv|pip)(\.cmd|\.exe|\.ps1)?\b[^"'`]*)/i;
+  const offenders = [];
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.isFile() && entry.name.endsWith(".js")) {
+        const match = readFileSync(full, "utf8").match(pattern);
+        if (match) offenders.push(`${full}: ${match[0].slice(0, 120)}`);
+      }
+    }
+  };
+  walk(distDir);
+  if (offenders.length > 0) {
+    throw new Error(`Packed CLI shells out to toolchain binaries:\n${offenders.join("\n")}`);
+  }
+  log("packed dist contains no python/pnpm/npx/ng/tsc spawn calls");
+}
+
+async function waitForStatus(timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = "no attempts";
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(STATUS_URL, { signal: AbortSignal.timeout(3000) });
+      const body = await response.json();
+      if (response.ok && body?.status === "ok" && body?.data?.system?.status) return body;
+      lastError = `unexpected status body: ${JSON.stringify(body).slice(0, 200)}`;
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+    }
+    await new Promise((resolveSleep) => setTimeout(resolveSleep, POLL_INTERVAL_MS));
+  }
+  throw new Error(`Core did not become healthy at ${STATUS_URL} in ${timeoutMs}ms (last: ${lastError}).`);
+}
+
+function shutdownChild(child) {
+  return new Promise((promiseResolve) => {
+    const timer = setTimeout(() => {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // Already gone; the exit handler below resolves.
+      }
+    }, 15_000);
+    if (typeof timer.unref === "function") timer.unref();
+    child.once("exit", () => {
+      clearTimeout(timer);
+      promiseResolve();
+    });
+    try {
+      child.kill("SIGTERM");
+    } catch {
+      clearTimeout(timer);
+      promiseResolve();
+    }
+  });
+}
+
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+  const tmpRoot = mkdtempSync(join(tmpdir(), "crucible-packed-smoke-"));
+  const prefix = join(tmpRoot, "prefix");
+  const cache = join(tmpRoot, "npm-cache");
+  const dataDir = join(tmpRoot, "data");
+  const tarballDir = join(tmpRoot, "tarballs");
+  mkdirSync(prefix, { recursive: true });
+  mkdirSync(cache, { recursive: true });
+  mkdirSync(dataDir, { recursive: true });
+  writeFileSync(join(prefix, "package.json"), JSON.stringify({ name: "crucible-packed-smoke", private: true }));
+
+  let serveChild;
+  let failed = false;
+  try {
+    const hostRuntime = hostRuntimePackage();
+    const cliTarball = args.cliTarball ? resolve(args.cliTarball) : await packCli(CLI_ROOT, tarballDir);
+    const runtimeTarball = args.runtimeTarball ? resolve(args.runtimeTarball) : await npmPack(hostRuntime.dir, tarballDir);
+    for (const [label, tarball] of [["CLI", cliTarball], ["runtime", runtimeTarball]]) {
+      if (!existsSync(tarball)) throw new Error(`${label} tarball not found at ${tarball}.`);
+    }
+    assertCliTarballOptionalDepsExact(cliTarball);
+    log(`CLI tarball: ${cliTarball}`);
+    log(`runtime tarball: ${runtimeTarball}`);
+    const { specs: depSpecs, tarballs: depTarballs } = await vendorWorkspaceDepTarballs(tarballDir);
+
+    log("installing tarballs into an isolated prefix (offline, no scripts)");
+    const install = await runCapture(
+      process.execPath,
+      [
+        npmCliJs(),
+        "install",
+        "--offline",
+        "--ignore-scripts",
+        "--no-save",
+        "--no-package-lock",
+        "--no-audit",
+        "--no-fund",
+        "--cache",
+        cache,
+        runtimeTarball,
+        cliTarball,
+        ...depTarballs,
+      ],
+      { cwd: prefix, env: cleanNpmEnv(process.env) },
+    );
+    if (/npm warn/i.test(install.stderr)) log(`npm warnings:\n${install.stderr.trim()}`);
+
+    const cliDir = join(prefix, "node_modules", "@crucible", "cli");
+    const cliEntry = join(cliDir, "dist", "index.js");
+    const cliPkgPath = join(cliDir, "package.json");
+    if (!existsSync(cliEntry)) throw new Error(`Installed CLI entry missing at ${cliEntry}.`);
+    const cliPkg = JSON.parse(readFileSync(cliPkgPath, "utf8"));
+    log(`installed @crucible/cli ${cliPkg.version}`);
+    for (const [name, spec] of Object.entries(depSpecs)) {
+      if (cliPkg.dependencies?.[name] !== spec) {
+        throw new Error(
+          `Installed CLI manifest lost dependency ${name}@${spec} (packed tarball is missing the declaration).`,
+        );
+      }
+    }
+    if (Object.keys(depSpecs).length > 0) log(`installed CLI manifest preserves dependencies: ${Object.keys(depSpecs).join(", ")}`);
+
+    // The resolver creates require() relative to the CLI itself, so the
+    // runtime must be reachable as a sibling top-level package.
+    const requireFromCli = createRequire(pathToFileURL(cliEntry).href);
+    const runtimePkgPath = requireFromCli.resolve(`${hostRuntime.name}/package.json`);
+    log(`CLI resolves ${hostRuntime.name} at ${runtimePkgPath}`);
+    const runtimeDir = dirname(runtimePkgPath);
+    if (!existsSync(join(runtimeDir, "runtime-manifest.json"))) {
+      throw new Error(`Resolved runtime is missing runtime-manifest.json at ${runtimeDir}.`);
+    }
+
+    // Packed dashboard assets must ship inside the tarball.
+    const dashboardDir = join(cliDir, "dashboard");
+    if (!existsSync(join(dashboardDir, "index.html"))) {
+      throw new Error(`Packed dashboard assets missing at ${dashboardDir} (expected index.html).`);
+    }
+    log("packed dashboard assets present (dashboard/index.html)");
+
+    // Exercise the packed static handler directly: no browser, no persistence.
+    const { createDashboardHandler } = await import(
+      pathToFileURL(join(cliDir, "dist", "dashboard", "server.js")).href
+    );
+    const dashboardServer = createServer(createDashboardHandler(dashboardDir, "http://127.0.0.1:7331"));
+    await new Promise((promiseResolve, promiseReject) => {
+      dashboardServer.once("error", promiseReject);
+      dashboardServer.listen(0, "127.0.0.1", () => promiseResolve());
+    });
+    try {
+      const address = dashboardServer.address();
+      if (!address || typeof address !== "object") throw new Error("Dashboard probe server has no address.");
+      const probe = await fetch(`http://127.0.0.1:${address.port}/`, { signal: AbortSignal.timeout(5000) });
+      const probeText = await probe.text();
+      if (!probe.ok || !probeText.includes("<!doctype html")) {
+        throw new Error(`Packed dashboard handler did not serve index.html (status ${probe.status}).`);
+      }
+      const v1 = await fetch(`http://127.0.0.1:${address.port}/v1/status`, {
+        signal: AbortSignal.timeout(5000),
+      });
+      await v1.text();
+      if (v1.status === 200) throw new Error("Packed dashboard handler must not SPA-fallback /v1 routes.");
+      log("packed dashboard handler serves index.html and guards /v1 routes");
+    } finally {
+      await new Promise((promiseResolve) => dashboardServer.close(() => promiseResolve()));
+    }
+
+    assertNoToolchainCalls(join(cliDir, "dist"));
+
+    log("running packed CLI --version");
+    const { stdout: versionOut } = await runCapture(process.execPath, [cliEntry, "--version"], { cwd: tmpRoot });
+    if (versionOut.trim() !== String(cliPkg.version)) {
+      throw new Error(
+        `--version mismatch: got ${JSON.stringify(versionOut.trim())}, want ${JSON.stringify(cliPkg.version)}.`,
+      );
+    }
+    log(`packed CLI --version -> ${versionOut.trim()}`);
+
+    log("starting packed CLI serve with a temp CRUCIBLE_DATA_DIR");
+    let serveOutput = "";
+    serveChild = spawn(process.execPath, [cliEntry, "serve"], {
+      env: { ...process.env, CRUCIBLE_DATA_DIR: dataDir },
+      stdio: ["ignore", "pipe", "pipe"],
+      shell: false,
+      detached: false,
+      windowsHide: true,
+    });
+    serveChild.stdout?.on("data", (chunk) => {
+      serveOutput += String(chunk);
+    });
+    serveChild.stderr?.on("data", (chunk) => {
+      serveOutput += String(chunk);
+    });
+    const earlyExit = new Promise((_, rejectExit) => {
+      serveChild?.once("exit", (code, signal) => {
+        rejectExit(new Error(`serve exited early with code ${code} signal ${signal}. Output:\n${serveOutput.slice(-2000)}`));
+      });
+    });
+    // Suppress unhandled rejection once the race has a winner.
+    earlyExit.catch(() => {});
+
+    const envelope = await Promise.race([waitForStatus(args.timeoutMs), earlyExit]);
+    log(
+      `core status ok (version ${envelope.data.system.version}, migration ${envelope.data.system.database.migration_revision})`,
+    );
+
+    await shutdownChild(serveChild);
+    serveChild = undefined;
+    log("serve shut down cleanly");
+
+    // Confirm the data dir was actually used (proves the env contract).
+    if (!existsSync(join(dataDir, "crucible.db"))) {
+      throw new Error(`Expected a database at ${join(dataDir, "crucible.db")}; CRUCIBLE_DATA_DIR was not honored.`);
+    }
+    log("CRUCIBLE_DATA_DIR honored (crucible.db created)");
+
+    log("PACKED SMOKE PASSED");
+  } catch (error) {
+    failed = true;
+    throw error;
+  } finally {
+    if (serveChild && serveChild.exitCode === null) {
+      await shutdownChild(serveChild).catch(() => {});
+      serveChild = undefined;
+    }
+    if (!args.keepTemp || failed) {
+      rmSync(tmpRoot, { recursive: true, force: true });
+      if (!args.keepTemp) log(`removed temp dir ${tmpRoot}`);
+    } else {
+      log(`kept temp dir ${tmpRoot}`);
+    }
+  }
+}
+
+void main().catch((error) => {
+  console.error(`[packed-smoke] FAILED: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
+  process.exitCode = 1;
+});

@@ -1,0 +1,32 @@
+{
+  "name": "@crucible/core-win32-x64",
+  "version": "0.1.0",
+  "description": "Crucible Core prebuilt runtime for win32-x64.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pablozr/Crucible.git",
+    "directory": "packages/core-win32-x64"
+  },
+  "homepage": "https://github.com/pablozr/Crucible",
+  "bugs": {
+    "url": "https://github.com/pablozr/Crucible/issues"
+  },
+  "engines": {
+    "node": ">=22.14.0"
+  },
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin/**",
+    "runtime-manifest.json",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

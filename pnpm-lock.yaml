@@ -23,7 +23,32 @@ importers:
 
   packages/adapters: {}
 
-  packages/cli: {}
+  packages/cli:
+    dependencies:
+      yaml:
+        specifier: ^2.8.0
+        version: 2.9.0
+    optionalDependencies:
+      '@crucible/core-darwin-arm64':
+        specifier: workspace:0.1.0
+        version: link:../core-darwin-arm64
+      '@crucible/core-darwin-x64':
+        specifier: workspace:0.1.0
+        version: link:../core-darwin-x64
+      '@crucible/core-linux-x64-gnu':
+        specifier: workspace:0.1.0
+        version: link:../core-linux-x64-gnu
+      '@crucible/core-win32-x64':
+        specifier: workspace:0.1.0
+        version: link:../core-win32-x64
+
+  packages/core-darwin-arm64: {}
+
+  packages/core-darwin-x64: {}
+
+  packages/core-linux-x64-gnu: {}
+
+  packages/core-win32-x64: {}
 
   packages/dashboard:
     dependencies:

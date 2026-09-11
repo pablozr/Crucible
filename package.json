@@ -1,12 +1,13 @@
 {
-  "name": "crucible",
+  "name": "crucible-workspace",
   "private": true,
   "packageManager": "pnpm@10.33.2",
   "scripts": {
     "build": "pnpm --filter @crucible/cli --filter @crucible/adapters --filter @crucible/dashboard build",
     "test": "pnpm --filter @crucible/cli --filter @crucible/adapters --filter @crucible/dashboard test",
     "typecheck": "pnpm --filter @crucible/cli --filter @crucible/adapters --filter @crucible/dashboard typecheck",
-    "dev:dashboard": "pnpm --filter @crucible/dashboard dev"
+    "dev:dashboard": "pnpm --filter @crucible/dashboard dev",
+    "verify:release": "node scripts/verify-release.mjs --expected-version 0.1.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
