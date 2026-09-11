@@ -23,9 +23,11 @@
 //
 // Temp dirs and child processes are always cleaned up (unless --keep-temp).
 // All spawns use shell: false and process.execPath; npm runs via its bundled
-// npm-cli.js and pnpm runs via Node's bundled corepack pnpm.js so no shell
-// is needed on Windows either (spawning bare `pnpm` with shell: false fails
-// with ENOENT there because only pnpm.CMD exists on PATH).
+// npm-cli.js (resolved across the bin/lib layouts shipped by installers and
+// setup-node) and pnpm runs via Node's bundled corepack pnpm.js so no shell
+// is needed on Windows either (spawning bare `npm`/`pnpm` with shell: false
+// fails there: only npm.CMD/pnpm.CMD exist on PATH, and spawning .CMD without
+// a shell throws EINVAL on modern Node).
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import {
@@ -126,10 +128,26 @@ function runCapture(command, args, options = {}) {
   });
 }
 
+/**
+ * npm's bundled CLI. setup-node (and most installers) place node at
+ * <prefix>/bin/node with npm at <prefix>/lib/node_modules/npm, not next to
+ * process.execPath, so probe each known layout instead of a single path.
+ * Running npm-cli.js with process.execPath keeps shell: false working on
+ * Windows (spawning npm/npm.cmd from PATH without a shell fails there with
+ * ENOENT/EINVAL on modern Node).
+ */
 function npmCliJs() {
-  const bundled = join(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
-  if (existsSync(bundled)) return bundled;
-  throw new Error("Cannot locate npm's npm-cli.js next to process.execPath; install Node.js with npm to run the packed smoke.");
+  const execDir = dirname(process.execPath);
+  const candidates = [
+    join(execDir, "node_modules", "npm", "bin", "npm-cli.js"),
+    resolve(execDir, "..", "lib", "node_modules", "npm", "bin", "npm-cli.js"),
+  ];
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate;
+  }
+  throw new Error(
+    `Cannot locate npm's npm-cli.js (tried ${candidates.join(", ")}); install Node.js with npm to run the packed smoke.`,
+  );
 }
 
 async function npmPack(packageDir, outDir) {
