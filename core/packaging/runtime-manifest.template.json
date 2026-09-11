@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "productVersion": "0.1.0",
+  "apiVersion": "v1",
+  "target": "win32-x64",
+  "executable": "bin/crucible-core.exe",
+  "sha256": "REPLACED_BY_BUILD"
+}
