@@ -1,5 +1,5 @@
 {
-  "name": "@crucible/cli",
+  "name": "@pablozrrrr/cli",
   "version": "0.1.0",
   "description": "Crucible CLI — local-first task-level code provenance for coding agents.",
   "type": "module",
@@ -29,10 +29,10 @@
     "access": "public"
   },
   "optionalDependencies": {
-    "@crucible/core-win32-x64": "workspace:0.1.0",
-    "@crucible/core-darwin-x64": "workspace:0.1.0",
-    "@crucible/core-darwin-arm64": "workspace:0.1.0",
-    "@crucible/core-linux-x64-gnu": "workspace:0.1.0"
+    "@pablozrrrr/core-win32-x64": "workspace:0.1.0",
+    "@pablozrrrr/core-darwin-x64": "workspace:0.1.0",
+    "@pablozrrrr/core-darwin-arm64": "workspace:0.1.0",
+    "@pablozrrrr/core-linux-x64-gnu": "workspace:0.1.0"
   },
   "dependencies": {
     "yaml": "^2.8.0"

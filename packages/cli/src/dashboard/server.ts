@@ -232,7 +232,7 @@ export function startDashboardServer(options: DashboardServerOptions): Promise<S
   if (!existsSync(indexFile)) {
     return Promise.reject(
       new Error(
-        `Dashboard assets are missing at ${assetsDir} (expected index.html). Build the dashboard with "pnpm --filter @crucible/dashboard build" and rebuild the CLI so assets are staged under packages/cli/dashboard.`,
+        `Dashboard assets are missing at ${assetsDir} (expected index.html). Build the dashboard with "pnpm --filter @pablozrrrr/dashboard build" and rebuild the CLI so assets are staged under packages/cli/dashboard.`,
       ),
     );
   }

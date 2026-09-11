@@ -81,8 +81,8 @@ The design prioritizes reliable attribution: one active task per physical workin
 
 ## Getting started
 
-> **Prerelease.** `@crucible/cli` `0.1.0` is not published to npm yet. Once
-> published, install it with `npm install -g @crucible/cli`. Until then, use
+> **Prerelease.** `@pablozrrrr/cli` `0.1.0` is not published to npm yet. Once
+> published, install it with `npm install -g @pablozrrrr/cli`. Until then, use
 > the source development setup below.
 
 This is a **source development setup** for the current foundation. You will need Git, a recent Node.js version (22+ recommended), pnpm **10.33.2**, and Python **3.12+**.

@@ -1,5 +1,5 @@
 {
-  "name": "@crucible/core-darwin-arm64",
+  "name": "@pablozrrrr/core-darwin-arm64",
   "version": "0.1.0",
   "description": "Crucible Core prebuilt runtime for darwin-arm64.",
   "license": "MIT",

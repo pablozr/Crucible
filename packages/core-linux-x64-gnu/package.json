@@ -1,5 +1,5 @@
 {
-  "name": "@crucible/core-linux-x64-gnu",
+  "name": "@pablozrrrr/core-linux-x64-gnu",
   "version": "0.1.0",
   "description": "Crucible Core prebuilt runtime for linux-x64-gnu (glibc).",
   "license": "MIT",

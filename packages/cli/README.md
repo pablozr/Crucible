@@ -1,9 +1,9 @@
-# @crucible/cli
+# @pablozrrrr/cli
 
 Crucible CLI — local-first task-level code provenance for coding agents.
 
 > **Prerelease.** Version `0.1.0` is not published to npm yet. Once published,
-> install it with `npm install -g @crucible/cli`.
+> install it with `npm install -g @pablozrrrr/cli`.
 
 ## Requirements
 
@@ -27,8 +27,8 @@ the Core; it is not served by the Core itself.
 ## Platform runtimes
 
 The CLI resolves a prebuilt `crucible-core` runtime from its optional
-dependencies (`@crucible/core-win32-x64`, `@crucible/core-darwin-x64`,
-`@crucible/core-darwin-arm64`, `@crucible/core-linux-x64-gnu`, glibc only on
+dependencies (`@pablozrrrr/core-win32-x64`, `@pablozrrrr/core-darwin-x64`,
+`@pablozrrrr/core-darwin-arm64`, `@pablozrrrr/core-linux-x64-gnu`, glibc only on
 Linux). Each runtime package carries a `runtime-manifest.json` pinning the
 product version, target, executable, and sha256.
 

@@ -22,8 +22,9 @@
 //   only warned), plus strict aggregate-layout checks on <dir>: exactly the 5
 //   expected tarballs for the product version, a SHA256SUMS file whose
 //   entries match the recomputed file hashes, and an inspection of the packed
-//   CLI manifest proving the `workspace:` source pins were converted to exact
-//   optionalDependencies pins. NOTE: this mode checks file names, hashes, and
+//   CLI manifest proving the package name is @pablozrrrr/cli and the
+//   `workspace:` source pins were converted to exact optionalDependencies
+//   pins. NOTE: this mode checks file names, hashes, and
 //   the packed CLI manifest only; other package
 //   contents were already validated by the --runtime-package checks in the
 //   per-OS jobs and the CLI source check in build-cli.
@@ -35,11 +36,12 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const REPO_URL = "git+https://github.com/pablozr/Crucible.git";
+const CLI_PACKAGE_NAME = "@pablozrrrr/cli";
 
 const RUNTIMES = [
   {
     target: "win32-x64",
-    packageName: "@crucible/core-win32-x64",
+    packageName: "@pablozrrrr/core-win32-x64",
     dir: "packages/core-win32-x64",
     os: ["win32"],
     cpu: ["x64"],
@@ -47,7 +49,7 @@ const RUNTIMES = [
   },
   {
     target: "darwin-x64",
-    packageName: "@crucible/core-darwin-x64",
+    packageName: "@pablozrrrr/core-darwin-x64",
     dir: "packages/core-darwin-x64",
     os: ["darwin"],
     cpu: ["x64"],
@@ -55,7 +57,7 @@ const RUNTIMES = [
   },
   {
     target: "darwin-arm64",
-    packageName: "@crucible/core-darwin-arm64",
+    packageName: "@pablozrrrr/core-darwin-arm64",
     dir: "packages/core-darwin-arm64",
     os: ["darwin"],
     cpu: ["arm64"],
@@ -63,7 +65,7 @@ const RUNTIMES = [
   },
   {
     target: "linux-x64-gnu",
-    packageName: "@crucible/core-linux-x64-gnu",
+    packageName: "@pablozrrrr/core-linux-x64-gnu",
     dir: "packages/core-linux-x64-gnu",
     os: ["linux"],
     cpu: ["x64"],
@@ -181,6 +183,9 @@ const cliPkg = readJson("packages/cli/package.json");
 let cliVersion;
 if (cliPkg !== undefined) {
   cliVersion = cliPkg.version;
+  if (cliPkg.name !== CLI_PACKAGE_NAME) {
+    failValue("packages/cli/package.json", "name", cliPkg.name, CLI_PACKAGE_NAME);
+  }
   // Source may pin workspace-local runtimes via the workspace: protocol
   // (pnpm resolves it to a local link). Published consumers must receive the
   // exact version instead — enforced on the packed CLI tarball in
@@ -508,6 +513,11 @@ if (tarballDir !== undefined) {
         if (packed === undefined) {
           fail(`${tarballDir}/${cliTarball}: cannot read embedded package/package.json (pack the CLI with npm pack)`);
         } else {
+          if (packed.name !== CLI_PACKAGE_NAME) {
+            fail(
+              `${tarballDir}/${cliTarball}: embedded package/package.json name is ${JSON.stringify(packed.name)} (expected ${JSON.stringify(CLI_PACKAGE_NAME)})`,
+            );
+          }
           for (const runtime of RUNTIMES) {
             const pinned = packed.optionalDependencies?.[runtime.packageName];
             if (pinned !== version) {

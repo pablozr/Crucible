@@ -61,17 +61,32 @@ jobs:
           pnpm typecheck
           pnpm test
       - name: Build dashboard (CLI stages it)
-        run: pnpm --filter @crucible/dashboard build
+        run: pnpm --filter @pablozrrrr/dashboard build
       - name: Build CLI (stages dashboard)
-        run: pnpm --filter @crucible/cli build
+        run: pnpm --filter @pablozrrrr/cli build
       - name: Pack CLI tarball
         # pnpm pack (never npm pack): the CLI's optionalDependencies use the
         # workspace: protocol in source, which npm pack keeps verbatim in the
         # tarball while pnpm pack rewrites to the exact version (0.1.0).
         # --pack-destination resolves from the invocation cwd (repo root).
+        # The produced filename follows the package name
+        # (pablozrrrr-cli-<version>.tgz); normalize it to the stable
+        # crucible-cli-<version>.tgz that the aggregate verifier, smoke step,
+        # and release workflow expect.
+        shell: bash
         run: |
+          CLI_VER="$(node -p "require('./packages/cli/package.json').version")"
+          rm -rf dist-cli
           mkdir -p dist-cli
-          pnpm --filter @crucible/cli pack --pack-destination ./dist-cli
+          pnpm --filter @pablozrrrr/cli pack --pack-destination ./dist-cli
+          shopt -s nullglob
+          TGZ=(dist-cli/*.tgz)
+          if [ "${#TGZ[@]}" -ne 1 ]; then
+            echo "expected exactly one CLI tarball in dist-cli, found ${#TGZ[@]}"
+            printf ' - %s\n' "${TGZ[@]}"
+            exit 1
+          fi
+          mv "${TGZ[0]}" "dist-cli/crucible-cli-${CLI_VER}.tgz"
           ls -la dist-cli
       - name: Upload CLI tarball
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # actions/upload-artifact 043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -166,10 +181,24 @@ jobs:
           CLI_VER="$(node -p "require('./packages/cli/package.json').version")"
           node scripts/verify-release.mjs --runtime-package ${{ matrix.pkg }} --expected-version "$CLI_VER" --require-runtime-manifest
       - name: Pack runtime tarball
+        # The produced filename follows the package name
+        # (pablozrrrr-core-<target>-<version>.tgz); normalize it to the stable
+        # crucible-core-<target>-<cli-version>.tgz that the aggregate verifier
+        # and release workflow expect.
         shell: bash
         run: |
+          CLI_VER="$(node -p "require(process.env.GITHUB_WORKSPACE + '/packages/cli/package.json').version")"
+          rm -rf ../../dist-runtime
           mkdir -p ../../dist-runtime
           npm pack --pack-destination ../../dist-runtime --silent
+          shopt -s nullglob
+          TGZ=(../../dist-runtime/*.tgz)
+          if [ "${#TGZ[@]}" -ne 1 ]; then
+            echo "expected exactly one runtime tarball in dist-runtime, found ${#TGZ[@]}"
+            printf ' - %s\n' "${TGZ[@]}"
+            exit 1
+          fi
+          mv "${TGZ[0]}" "../../dist-runtime/crucible-core-${{ matrix.target }}-${CLI_VER}.tgz"
           ls -la ../../dist-runtime
         working-directory: ${{ matrix.pkg }}
       - name: Smoke packed CLI + runtime
@@ -184,7 +213,7 @@ jobs:
           RUNTIME_TARBALL="$(ls dist-runtime/*.tgz | head -n 1)"
           echo "CLI: $CLI_TARBALL"
           echo "Runtime: $RUNTIME_TARBALL"
-          pnpm --filter @crucible/cli test:packed --cli-tarball "../../$CLI_TARBALL" --runtime-tarball "../../$RUNTIME_TARBALL"
+          pnpm --filter @pablozrrrr/cli test:packed --cli-tarball "../../$CLI_TARBALL" --runtime-tarball "../../$RUNTIME_TARBALL"
       - name: Upload runtime tarball
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # actions/upload-artifact 043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:

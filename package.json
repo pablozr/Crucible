@@ -3,10 +3,10 @@
   "private": true,
   "packageManager": "pnpm@10.33.2",
   "scripts": {
-    "build": "pnpm --filter @crucible/cli --filter @crucible/adapters --filter @crucible/dashboard build",
-    "test": "pnpm --filter @crucible/cli --filter @crucible/adapters --filter @crucible/dashboard test",
-    "typecheck": "pnpm --filter @crucible/cli --filter @crucible/adapters --filter @crucible/dashboard typecheck",
-    "dev:dashboard": "pnpm --filter @crucible/dashboard dev",
+    "build": "pnpm --filter @pablozrrrr/cli --filter @pablozrrrr/adapters --filter @pablozrrrr/dashboard build",
+    "test": "pnpm --filter @pablozrrrr/cli --filter @pablozrrrr/adapters --filter @pablozrrrr/dashboard test",
+    "typecheck": "pnpm --filter @pablozrrrr/cli --filter @pablozrrrr/adapters --filter @pablozrrrr/dashboard typecheck",
+    "dev:dashboard": "pnpm --filter @pablozrrrr/dashboard dev",
     "verify:release": "node scripts/verify-release.mjs --expected-version 0.1.0"
   },
   "devDependencies": {

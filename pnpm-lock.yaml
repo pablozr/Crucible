@@ -29,16 +29,16 @@ importers:
         specifier: ^2.8.0
         version: 2.9.0
     optionalDependencies:
-      '@crucible/core-darwin-arm64':
+      '@pablozrrrr/core-darwin-arm64':
         specifier: workspace:0.1.0
         version: link:../core-darwin-arm64
-      '@crucible/core-darwin-x64':
+      '@pablozrrrr/core-darwin-x64':
         specifier: workspace:0.1.0
         version: link:../core-darwin-x64
-      '@crucible/core-linux-x64-gnu':
+      '@pablozrrrr/core-linux-x64-gnu':
         specifier: workspace:0.1.0
         version: link:../core-linux-x64-gnu
-      '@crucible/core-win32-x64':
+      '@pablozrrrr/core-win32-x64':
         specifier: workspace:0.1.0
         version: link:../core-win32-x64
 

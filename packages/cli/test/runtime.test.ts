@@ -21,19 +21,19 @@ function sha256(bytes: Uint8Array): string {
 test("target matrix selects the expected optional package", () => {
   assert.deepEqual(selectRuntimeTarget({ platform: "win32", arch: "x64" }), {
     target: "win32-x64",
-    packageName: "@crucible/core-win32-x64",
+    packageName: "@pablozrrrr/core-win32-x64",
   });
   assert.deepEqual(selectRuntimeTarget({ platform: "darwin", arch: "x64" }), {
     target: "darwin-x64",
-    packageName: "@crucible/core-darwin-x64",
+    packageName: "@pablozrrrr/core-darwin-x64",
   });
   assert.deepEqual(selectRuntimeTarget({ platform: "darwin", arch: "arm64" }), {
     target: "darwin-arm64",
-    packageName: "@crucible/core-darwin-arm64",
+    packageName: "@pablozrrrr/core-darwin-arm64",
   });
   assert.deepEqual(
     selectRuntimeTarget({ platform: "linux", arch: "x64", libc: "glibc" }),
-    { target: "linux-x64-gnu", packageName: "@crucible/core-linux-x64-gnu" },
+    { target: "linux-x64-gnu", packageName: "@pablozrrrr/core-linux-x64-gnu" },
   );
 });
 
@@ -100,7 +100,7 @@ function makePackageFixture(options: FixtureOptions = {}): {
   packageName: string;
 } {
   const target = options.target ?? "win32-x64";
-  const packageName = options.packageName ?? `@crucible/core-${target}`;
+  const packageName = options.packageName ?? `@pablozrrrr/core-${target}`;
   const dir = mkdtempSync(join(tmpdir(), "crucible-runtime-"));
   const pkgDir = join(dir, "pkg");
   const executableRel = options.executable ?? "bin/crucible-core.exe";
@@ -148,13 +148,13 @@ test("resolves a temp package and verifies the executable hash", () => {
   const resolved = resolveCore({
     ...platformArchFor("win32-x64"),
     requireResolve: (spec) => {
-      assert.equal(spec, "@crucible/core-win32-x64/package.json");
+      assert.equal(spec, "@pablozrrrr/core-win32-x64/package.json");
       return fixture.packageJsonPath;
     },
   });
 
   assert.equal(resolved.executablePath, fixture.executablePath);
-  assert.equal(resolved.packageName, "@crucible/core-win32-x64");
+  assert.equal(resolved.packageName, "@pablozrrrr/core-win32-x64");
   assert.equal(resolveCoreExecutable({
     ...platformArchFor("win32-x64"),
     requireResolve: () => fixture.packageJsonPath,
@@ -176,9 +176,9 @@ test("missing optional package names --omit=optional recovery", () => {
     assert.ok(error instanceof Error);
     message = error.message;
   }
-  assert.match(message, /optional package @crucible\/core-win32-x64/);
+  assert.match(message, /optional package @pablozrrrr\/core-win32-x64/);
   assert.match(message, /--omit=optional/);
-  assert.match(message, /npm install -g @crucible\/cli/);
+  assert.match(message, /npm install -g @pablozrrrr\/cli/);
 });
 
 test("malformed manifest JSON is rejected", () => {

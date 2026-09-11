@@ -11,10 +11,10 @@ export const SUPPORTED_TARGETS = [
 export type RuntimeTarget = (typeof SUPPORTED_TARGETS)[number];
 
 export const TARGET_PACKAGE: Record<RuntimeTarget, string> = {
-  "win32-x64": "@crucible/core-win32-x64",
-  "darwin-x64": "@crucible/core-darwin-x64",
-  "darwin-arm64": "@crucible/core-darwin-arm64",
-  "linux-x64-gnu": "@crucible/core-linux-x64-gnu",
+  "win32-x64": "@pablozrrrr/core-win32-x64",
+  "darwin-x64": "@pablozrrrr/core-darwin-x64",
+  "darwin-arm64": "@pablozrrrr/core-darwin-arm64",
+  "linux-x64-gnu": "@pablozrrrr/core-linux-x64-gnu",
 };
 
 export type LinuxLibc = "glibc" | "musl" | "unknown";
