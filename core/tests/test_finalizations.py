@@ -2221,7 +2221,8 @@ def test_concurrent_frozen_replays_stay_idempotent(monkeypatch, tmp_path):
         # Pelo menos um retry conclui; o outro nunca corrompe:
         # ou conclui igual ou observa IN_PROGRESS transitório.
         codes = sorted(
-            response.status_code for response in results  # type: ignore[union-attr]
+            response.status_code
+            for response in results  # type: ignore[union-attr]
         )
         assert codes in ([200, 200], [200, 409])
         for response in results:  # type: ignore[union-attr]
@@ -2296,9 +2297,7 @@ def test_frozen_replay_with_corrupt_evidence_terminalizes(
             connection.close()
         second = client.post("/v1/events", json=event)
         assert second.status_code == 500, second.text
-        assert (
-            second.json()["data"]["code"] == "FINAL_MATERIALIZATION_FAILED"
-        )
+        assert second.json()["data"]["code"] == "FINAL_MATERIALIZATION_FAILED"
         assert captures["count"] == 1
         connection = sqlite3.connect(database_path(tmp_path))
         try:
@@ -2408,9 +2407,7 @@ def test_frozen_replay_fail_lock_stays_retryable_then_terminalizes(
         # Lock liberado: retry terminaliza failed/rejected.
         retry2 = client.post("/v1/events", json=event)
         assert retry2.status_code == 500, retry2.text
-        assert (
-            retry2.json()["data"]["code"] == "FINAL_MATERIALIZATION_FAILED"
-        )
+        assert retry2.json()["data"]["code"] == "FINAL_MATERIALIZATION_FAILED"
         assert captures["count"] == 1
         connection = sqlite3.connect(database_path(tmp_path))
         try:
