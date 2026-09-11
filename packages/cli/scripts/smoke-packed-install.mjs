@@ -331,26 +331,178 @@ async function waitForStatus(timeoutMs) {
 }
 
 function shutdownChild(child) {
-  return new Promise((promiseResolve) => {
+  // Placeholder replaced below by the tree-aware shutdown helpers.
+  return shutdownChildTree(child);
+}
+
+const SHUTDOWN_TERM_GRACE_MS = 15_000;
+const SHUTDOWN_KILL_GRACE_MS = 10_000;
+const SHUTDOWN_WINDOWS_GRACE_MS = 20_000;
+const TASKKILL_TIMEOUT_MS = 15_000;
+
+/** Children that provably emitted `close` (exit + stdio close). */
+const closedChildren = new WeakSet();
+
+/**
+ * True once `close` provably fired. `destroyed` is deliberately excluded:
+ * a destroyed pipe can precede the real close, so only the tracked `close`
+ * event or `stream.closed` counts as proven.
+ */
+function isChildClosed(child) {
+  if (closedChildren.has(child)) return true;
+  const exited = child.exitCode !== null || child.signalCode !== null;
+  const stdoutClosed = !child.stdout || child.stdout.closed === true;
+  const stderrClosed = !child.stderr || child.stderr.closed === true;
+  return Boolean(exited && stdoutClosed && stderrClosed);
+}
+
+/** Bounded wait for the child `close` event (exit + stdio close). Never hangs. */
+function waitForClose(child, timeoutMs) {
+  if (isChildClosed(child)) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.off("close", onClose);
+      resolve(isChildClosed(child));
+    }, timeoutMs);
+    const onClose = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      closedChildren.add(child);
+      resolve(true);
+    };
+    child.once("close", onClose);
+    // Close may have fired between the first check and listener registration.
+    if (isChildClosed(child)) {
+      settled = true;
+      clearTimeout(timer);
+      child.off("close", onClose);
+      closedChildren.add(child);
+      resolve(true);
+    }
+  });
+}
+
+function destroyChildPipes(child) {
+  try {
+    child.stdout?.destroy();
+  } catch {
+    // Best effort: unblock the event loop so the runner can exit and report.
+  }
+  try {
+    child.stderr?.destroy();
+  } catch {
+    // Best effort: unblock the event loop so the runner can exit and report.
+  }
+}
+
+/**
+ * Terminate the exact tree owned by `pid` on Windows. Never matches by name;
+ * only the recorded PID with /T (descendants). Resolves with the taskkill
+ * outcome so the caller can accept benign not-found based on actual output.
+ */
+function taskkillTree(pid) {
+  return new Promise((resolve, reject) => {
+    let child;
+    try {
+      child = spawn("taskkill", ["/PID", String(pid), "/T", "/F"], { shell: false, windowsHide: true });
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    let stdout = "";
+    let stderr = "";
     const timer = setTimeout(() => {
       try {
         child.kill("SIGKILL");
       } catch {
-        // Already gone; the exit handler below resolves.
+        // Best effort; the close handler below reports the timeout.
       }
-    }, 15_000);
-    if (typeof timer.unref === "function") timer.unref();
-    child.once("exit", () => {
-      clearTimeout(timer);
-      promiseResolve();
+      reject(new Error(`taskkill /PID ${pid} /T /F timed out after ${TASKKILL_TIMEOUT_MS}ms.`));
+    }, TASKKILL_TIMEOUT_MS);
+    child.stdout?.on("data", (chunk) => {
+      stdout += String(chunk);
     });
-    try {
-      child.kill("SIGTERM");
-    } catch {
+    child.stderr?.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+    child.on("error", (error) => {
       clearTimeout(timer);
-      promiseResolve();
-    }
+      reject(error);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolve({ code, stdout, stderr });
+    });
   });
+}
+
+function isBenignTaskkillNotFound(outcome) {
+  const output = `${outcome.stdout}\n${outcome.stderr}`;
+  return /could not be found|not found|no such process|does not exist|no process/i.test(output);
+}
+
+async function shutdownPosixTree(child, pid) {
+  // Waiter registered before the first signal to avoid missing `close`.
+  const closeAfterTerm = waitForClose(child, SHUTDOWN_TERM_GRACE_MS);
+  try {
+    process.kill(-pid, "SIGTERM");
+  } catch (error) {
+    if (error?.code !== "ESRCH") throw error;
+  }
+  if (await closeAfterTerm) return;
+  const closeAfterKill = waitForClose(child, SHUTDOWN_KILL_GRACE_MS);
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch (error) {
+    if (error?.code !== "ESRCH") throw error;
+  }
+  if (await closeAfterKill) return;
+  destroyChildPipes(child);
+  throw new Error(
+    `Serve child PID ${pid} did not close after SIGKILL to its process group (platform ${process.platform}).`,
+  );
+}
+
+async function shutdownWindowsTree(child, pid) {
+  // Waiter registered before taskkill so a fast `close` is never missed.
+  const closeWait = waitForClose(child, SHUTDOWN_WINDOWS_GRACE_MS);
+  let outcome;
+  try {
+    outcome = await taskkillTree(pid);
+  } catch (error) {
+    await closeWait;
+    destroyChildPipes(child);
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`taskkill /PID ${pid} /T /F failed (platform win32): ${detail}`);
+  }
+  if (outcome.code !== 0 && !isBenignTaskkillNotFound(outcome)) {
+    await closeWait;
+    destroyChildPipes(child);
+    const detail = `${outcome.stdout}\n${outcome.stderr}`.trim().slice(-2000);
+    throw new Error(`taskkill /PID ${pid} /T /F failed with code ${outcome.code}: ${detail}`);
+  }
+  if (await closeWait) return;
+  destroyChildPipes(child);
+  throw new Error(`Serve child PID ${pid} did not close after taskkill /T /F (platform win32).`);
+}
+
+/**
+ * Shut down the exact tree created for `serve`: POSIX signals the dedicated
+ * process group, Windows taskkills the recorded PID subtree. Resolves only
+ * after `close` (exit + stdio close) so inherited pipes cannot keep the
+ * runner alive. Rejects with PID/platform when `close` never occurs.
+ */
+async function shutdownChildTree(child) {
+  const pid = child.pid;
+  if (pid === undefined) {
+    throw new Error(`Cannot shut down serve child without a PID (platform ${process.platform}).`);
+  }
+  if (process.platform === "win32") return shutdownWindowsTree(child, pid);
+  return shutdownPosixTree(child, pid);
 }
 
 async function main() {
@@ -477,7 +629,7 @@ async function main() {
       env: { ...process.env, CRUCIBLE_DATA_DIR: dataDir },
       stdio: ["ignore", "pipe", "pipe"],
       shell: false,
-      detached: false,
+      detached: process.platform !== "win32",
       windowsHide: true,
     });
     serveChild.stdout?.on("data", (chunk) => {
@@ -514,8 +666,16 @@ async function main() {
     failed = true;
     throw error;
   } finally {
-    if (serveChild && serveChild.exitCode === null) {
-      await shutdownChild(serveChild).catch(() => {});
+    // Any still-recorded child may have open pipes or live descendants even
+    // when the launcher already exited, so always clean it up. Shutdown only
+    // clears `serveChild` on proven `close`; silence the retry only when a
+    // primary failure already determines the outcome.
+    if (serveChild) {
+      if (failed) {
+        await shutdownChild(serveChild).catch(() => {});
+      } else {
+        await shutdownChild(serveChild);
+      }
       serveChild = undefined;
     }
     if (!args.keepTemp || failed) {
