@@ -94,13 +94,13 @@ jobs:
         shell: bash
         run: |
           for f in dist/crucible-core-*.tgz; do
-            npm publish "$f" --access public --provenance
+            npm publish "./$f" --access public --provenance
           done
       - name: Publish CLI last
         shell: bash
         run: |
           for f in dist/crucible-cli-*.tgz; do
-            npm publish "$f" --access public --provenance
+            npm publish "./$f" --access public --provenance
           done
 
   github-release:
