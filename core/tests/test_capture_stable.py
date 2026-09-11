@@ -1797,6 +1797,153 @@ def test_freeze_sub_ms_remainder_rounds_busy_timeout_up(
     assert seen["busy_ms"] == 1
 
 
+def test_bulk_tree_and_diff_maps_match_per_path_helpers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "repo"
+    make_repo(root, {"a.txt": "a\n", "b.txt": "b\n"})
+    (root / "a.txt").write_text("dirty-a\n", encoding="utf-8")
+    head, branch = head_and_branch(root)
+    deadline = time.monotonic() + 60
+    tick = time.monotonic
+    paths = ["a.txt", "b.txt", "missing.txt"]
+    bulk_baseline = final_capture._ls_tree_map(
+        root, head, paths, deadline, tick
+    )
+    for path in paths:
+        single = final_capture._ls_tree_entry(root, head, path, deadline, tick)
+        assert bulk_baseline.get(path) == single
+    assert bulk_baseline.get("missing.txt") is None
+    bulk_modes = final_capture._worktree_diff_mode_map(root, deadline, tick)
+    assert bulk_modes.get("a.txt") in ("100644", "100755")
+    assert bulk_modes.get("b.txt") is None
+    # Same-head reuse: single tree query serves baseline and final.
+    assert (
+        final_capture._ls_tree_map(root, head, paths, deadline, tick)
+        == bulk_baseline
+    )
+
+
+def test_capture_uses_bulk_maps_without_per_path_helpers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "repo"
+    make_repo(root, {"a.txt": "a\n", "sp ace.txt": "s\n"})
+    (root / "a.txt").write_text("dirty-a\n", encoding="utf-8")
+    (root / "sp ace.txt").write_text("dirty-s\n", encoding="utf-8")
+    head, branch = head_and_branch(root)
+
+    def _forbidden_ls(*args, **kwargs):
+        raise AssertionError("per-path ls-tree must not be used")
+
+    def _forbidden_diff(*args, **kwargs):
+        raise AssertionError("per-path diff --raw must not be used")
+
+    monkeypatch.setattr(final_capture, "_ls_tree_entry", _forbidden_ls)
+    monkeypatch.setattr(
+        final_capture, "_worktree_diff_new_mode", _forbidden_diff
+    )
+    snapshot = final_capture.capture_final(
+        root,
+        head,
+        branch,
+        b"manifest",
+        [],
+        MAX_SIZE,
+        time.monotonic() + 60,
+    )
+    assert sorted(change.path for change in snapshot.changes) == [
+        "a.txt",
+        "sp ace.txt",
+    ]
+
+
+def test_parse_worktree_diff_map_rename_maps_effective_path() -> None:
+    old_oid = "a" * 40
+    new_oid = "b" * 40
+    raw = (
+        b":100644 100644 "
+        + old_oid.encode()
+        + b" "
+        + new_oid.encode()
+        + b" R100\0old.txt\0new.txt\0"
+    )
+    modes = final_capture._parse_worktree_diff_map(raw)
+    assert modes == {"new.txt": "100644"}
+    with pytest.raises(FinalizationError) as error:
+        final_capture._parse_worktree_diff_map(b"garbage\0path\0")
+    assert error.value.code == "BASELINE_OBJECT_UNAVAILABLE"
+
+
+def test_parse_ls_tree_map_malformed_fails_closed() -> None:
+    with pytest.raises(FinalizationError) as error:
+        final_capture._parse_ls_tree_map(b"100644 blob zz\tbad\x00")
+    # Non-hex OID is malformed, not absence.
+    assert error.value.code == "BASELINE_OBJECT_UNAVAILABLE"
+    with pytest.raises(FinalizationError) as missing_sep:
+        final_capture._parse_ls_tree_map(b"100644 blob abc\x00")
+    assert missing_sep.value.code == "BASELINE_OBJECT_UNAVAILABLE"
+    assert final_capture._parse_ls_tree_map(b"") == {}
+
+
+def test_ls_tree_map_batches_long_paths(tmp_path, monkeypatch) -> None:
+    names = [f"{'f' * 50}{index:04d}.txt" for index in range(4)]
+    make_repo(root := tmp_path / "repo", {name: "x\n" for name in names})
+    head, _ = head_and_branch(root)
+    deadline = time.monotonic() + 60
+    base = final_capture._ls_tree_argv_cost(
+        ["git", "-C", str(root), "ls-tree", "-z", head, "--"]
+    )
+    per_path = max(len(name) + 3 for name in names)
+    # Exactly one path per batch: forces len(names) invocations.
+    monkeypatch.setattr(
+        final_capture, "_LS_TREE_CMD_BUDGET_CHARS", base + per_path
+    )
+    seen: list[list[str]] = []
+    real_git = final_capture._git
+
+    def _spy(
+        root_arg: Path,
+        arguments: list[str],
+        deadline_arg: float,
+        tick_arg,
+    ):
+        if arguments[:2] == ["ls-tree", "-z"]:
+            assert (
+                final_capture._ls_tree_argv_cost(
+                    ["git", "-C", str(root_arg), *arguments]
+                )
+                <= final_capture._LS_TREE_CMD_BUDGET_CHARS
+            )
+            seen.append(list(arguments[4:]))
+        return real_git(root_arg, arguments, deadline_arg, tick_arg)
+
+    monkeypatch.setattr(final_capture, "_git", _spy)
+    batched = final_capture._ls_tree_map(
+        root, head, [*names, "missing.txt"], deadline, time.monotonic
+    )
+    assert len(seen) == len(names) + 1
+    for name in names:
+        single = final_capture._ls_tree_entry(
+            root, head, name, deadline, time.monotonic
+        )
+        assert batched.get(name) == single
+    assert batched.get("missing.txt") is None
+
+
+def test_ls_tree_map_oversize_path_emits_singleton(tmp_path) -> None:
+    root = tmp_path / "repo"
+    make_repo(root, {"a.txt": "a\n"})
+    head, _ = head_and_branch(root)
+    oversized = "x" * 9000
+    assert final_capture._batch_ls_tree_paths(root, head, [oversized]) == [
+        [oversized]
+    ]
+    assert final_capture._batch_ls_tree_paths(
+        root, head, ["a.txt", oversized, "b.txt"]
+    ) == [["a.txt"], [oversized], ["b.txt"]]
+
+
 def _coordinator_project(root: Path) -> str:
     import json
     import uuid

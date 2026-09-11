@@ -300,6 +300,15 @@ def _capture_paths(
     # Source for staged effective mode/OID; never the stored manifest.
     index_map = _ls_files_map(root, deadline, tick)
     paths = sorted(set(initial_rows) | set(final_states) | committed)
+    # Bulk tree/diff maps (one invocation each per stability read).
+    # Replaces the former per-path `ls-tree` and `diff --raw` calls.
+    if baseline_head == final_head:
+        baseline_map = _ls_tree_map(root, baseline_head, paths, deadline, tick)
+        final_map = baseline_map
+    else:
+        baseline_map = _ls_tree_map(root, baseline_head, paths, deadline, tick)
+        final_map = _ls_tree_map(root, final_head, paths, deadline, tick)
+    worktree_modes = _worktree_diff_mode_map(root, deadline, tick)
     frozen_baselines: list[BaselineFileRow] = []
     changes: list[TaskFileChangeRow] = []
 
@@ -309,10 +318,8 @@ def _capture_paths(
         initial = stored_initial
         if initial is not None and "D" in initial.status:
             initial = None
-        initial_entry = _ls_tree_entry(
-            root, baseline_head, path, deadline, tick
-        )
-        final_entry = _ls_tree_entry(root, final_head, path, deadline, tick)
+        initial_entry = baseline_map.get(path)
+        final_entry = final_map.get(path)
         index_entry = index_map.get(path)
         if stored_initial is None:
             initial = _freeze_baseline_entry(
@@ -339,6 +346,7 @@ def _capture_paths(
             tick,
             open_fn,
             budget,
+            worktree_modes,
         )
         xy = final_states.get(path)
         if _same_file(initial, final) and not _is_mode_only_change(
@@ -834,6 +842,191 @@ def _ls_tree_entry(
     return _match_tree_entry(tree_out, path)
 
 
+def _parse_ls_tree_map(raw: bytes) -> dict[str, _TreeEntry]:
+    # Bulk `git ls-tree -z` output: NUL-separated records of
+    # `<mode> SP <kind> SP <oid> TAB <path>`. Malformed records fail
+    # closed; paths absent from the output simply have no entry.
+    entries: dict[str, _TreeEntry] = {}
+    if not raw:
+        return entries
+    for record in raw.split(b"\0"):
+        if not record:
+            continue
+        meta, separator, name = record.partition(b"\t")
+        if not separator:
+            raise FinalizationError("BASELINE_OBJECT_UNAVAILABLE")
+        parts = meta.split(b" ")
+        if len(parts) != 3:
+            raise FinalizationError("BASELINE_OBJECT_UNAVAILABLE")
+        try:
+            mode = parts[0].decode("ascii")
+            kind = parts[1].decode("ascii")
+            oid = parts[2].decode("ascii")
+        except UnicodeDecodeError:
+            raise FinalizationError("BASELINE_OBJECT_UNAVAILABLE") from None
+        if not oid or any(
+            character not in "0123456789abcdef" for character in oid
+        ):
+            raise FinalizationError("BASELINE_OBJECT_UNAVAILABLE") from None
+        try:
+            path = name.decode("utf-8")
+        except UnicodeDecodeError:
+            raise FinalizationError("UNSUPPORTED_FINAL_PATH") from None
+        _reject_lossy_path(path)
+        entries[path] = _TreeEntry(mode=mode, kind=kind, oid=oid)
+    return entries
+
+
+# Conservative Windows command-line budget for one `git ls-tree`
+# invocation (no shell). Windows CreateProcess caps the command line at
+# 32767 chars; subprocess quoting adds overhead per arg, so batches stay
+# far below that with separator + quote margin included per path.
+_LS_TREE_CMD_BUDGET_CHARS = 8000
+
+
+def _ls_tree_argv_cost(arguments: list[str]) -> int:
+    # Estimated command-line length: arg chars + one separator space
+    # per arg + 2 chars quote margin per arg (subprocess quotes args
+    # containing spaces on Windows).
+    return sum(len(item) for item in arguments) + 3 * len(arguments)
+
+
+def _batch_ls_tree_paths(
+    root: Path, head: str, paths: list[str]
+) -> list[list[str]]:
+    # Deterministic greedy batches (input order preserved) whose
+    # estimated command line (`git -C <root> ls-tree -z <head> --`
+    # plus batch paths) stays within the budget. A single path that
+    # exceeds the conservative budget is emitted as a singleton batch
+    # so `_git`/OS decides with the real limit -- preserving the
+    # previous per-path behavior and its real error/deadline mapping.
+    base = ["git", "-C", str(root), "ls-tree", "-z", head, "--"]
+    base_cost = _ls_tree_argv_cost(base)
+    batches: list[list[str]] = []
+    current: list[str] = []
+    current_cost = base_cost
+    for path in paths:
+        cost = len(path) + 3
+        if current and (
+            current_cost + cost > _LS_TREE_CMD_BUDGET_CHARS
+            or base_cost + cost > _LS_TREE_CMD_BUDGET_CHARS
+        ):
+            batches.append(current)
+            current = []
+            current_cost = base_cost
+        current.append(path)
+        current_cost += cost
+    if current:
+        batches.append(current)
+    return batches
+
+
+def _ls_tree_map(
+    root: Path,
+    head: str,
+    paths: list[str],
+    deadline: float,
+    tick: Callable[[], float],
+) -> dict[str, _TreeEntry]:
+    # Batched `ls-tree`: one invocation per batch, combined into a
+    # single map. Absent paths stay absent (no entry), while a
+    # genuinely missing tree object fails closed. Each batch goes
+    # through `_git`, so the same absolute deadline applies per call.
+    if not paths:
+        return {}
+    for path in paths:
+        _reject_lossy_path(path)
+    combined: dict[str, _TreeEntry] = {}
+    for batch in _batch_ls_tree_paths(root, head, paths):
+        try:
+            raw = _git(
+                root, ["ls-tree", "-z", head, "--", *batch], deadline, tick
+            )
+        except FinalizationError as error:
+            if error.code in ("FINAL_SNAPSHOT_TIMEOUT", "FINAL_HASH_TIMEOUT"):
+                raise
+            raise FinalizationError("BASELINE_OBJECT_UNAVAILABLE") from error
+        try:
+            parsed = _parse_ls_tree_map(raw)
+        except FinalizationError as error:
+            if error.code == "UNSUPPORTED_FINAL_PATH":
+                raise
+            raise FinalizationError("BASELINE_OBJECT_UNAVAILABLE") from error
+        combined.update(parsed)
+    return combined
+
+
+def _parse_worktree_diff_map(raw: bytes) -> dict[str, str]:
+    # Bulk `git diff --raw -z --no-renames` output: repeating
+    # `<header> NUL <path> NUL` pairs where the header is
+    # `:<oldmode> <newmode> <oldsha> <newsha> <status>`. Returns
+    # path -> worktree (new) mode. Rename/copy records (two paths)
+    # map the effective (new) path; with `--no-renames` they only
+    # appear if Git ever emits them despite the flag.
+    modes: dict[str, str] = {}
+    if not raw:
+        return modes
+    tokens = [item for item in raw.split(b"\0") if item]
+    index = 0
+    while index < len(tokens):
+        header = tokens[index]
+        index += 1
+        if not header.startswith(b":"):
+            raise FinalizationError("BASELINE_OBJECT_UNAVAILABLE") from None
+        parts = header[1:].split(b" ")
+        if len(parts) < 5:
+            raise FinalizationError("BASELINE_OBJECT_UNAVAILABLE") from None
+        try:
+            new_mode = parts[1].decode("ascii")
+            status = parts[4].decode("ascii")
+        except UnicodeDecodeError:
+            raise FinalizationError("BASELINE_OBJECT_UNAVAILABLE") from None
+        if index >= len(tokens):
+            raise FinalizationError("BASELINE_OBJECT_UNAVAILABLE") from None
+        try:
+            first_path = tokens[index].decode("utf-8")
+        except UnicodeDecodeError:
+            raise FinalizationError("UNSUPPORTED_FINAL_PATH") from None
+        _reject_lossy_path(first_path)
+        index += 1
+        if status[:1] in ("R", "C"):
+            if index >= len(tokens):
+                raise FinalizationError(
+                    "BASELINE_OBJECT_UNAVAILABLE"
+                ) from None
+            try:
+                new_path = tokens[index].decode("utf-8")
+            except UnicodeDecodeError:
+                raise FinalizationError("UNSUPPORTED_FINAL_PATH") from None
+            _reject_lossy_path(new_path)
+            index += 1
+            modes[new_path] = new_mode
+        else:
+            modes[first_path] = new_mode
+    return modes
+
+
+def _worktree_diff_mode_map(
+    root: Path, deadline: float, tick: Callable[[], float]
+) -> dict[str, str]:
+    # One worktree-vs-index raw diff per stability read; paths without
+    # a diff entry stay absent (caller maps to None, as before).
+    try:
+        raw = _git(
+            root, ["diff", "--raw", "-z", "--no-renames"], deadline, tick
+        )
+    except FinalizationError as error:
+        if error.code in ("FINAL_SNAPSHOT_TIMEOUT", "FINAL_HASH_TIMEOUT"):
+            raise
+        raise FinalizationError("BASELINE_OBJECT_UNAVAILABLE") from error
+    try:
+        return _parse_worktree_diff_map(raw)
+    except FinalizationError as error:
+        if error.code == "UNSUPPORTED_FINAL_PATH":
+            raise
+        raise FinalizationError("BASELINE_OBJECT_UNAVAILABLE") from error
+
+
 def _is_symlink_entry(entry: _TreeEntry | None) -> bool:
     return (
         entry is not None and entry.kind == "blob" and entry.mode == "120000"
@@ -1096,6 +1289,7 @@ def _resolve_final(
     tick: Callable[[], float],
     open_fn: Callable[..., Any],
     budget: HashBudget,
+    worktree_modes: dict[str, str] | None = None,
 ) -> tuple[BaselineFileRow | None, str | None]:
     # Effective-mode contract (Windows-portable, staged+unstaged).
     # Invariant: final_* rows represent the effective final WORKTREE;
@@ -1342,15 +1536,20 @@ def _resolve_final(
     if row is not None:
         # Worktree content AND worktree mode are authoritative whenever
         # Y diverges (covers X/Y combined: ` M`, `MM`, `AM`, `TM`...).
-        # The worktree mode comes from `git diff --raw -z -- <path>`
-        # (Git-computed via lstat, respects core.filemode); the index
+        # The worktree mode comes from the bulk `git diff --raw -z`
+        # map when provided (one invocation per stability read),
+        # else the legacy per-path helper (Git-computed via lstat,
+        # respects core.filemode); the index
         # is never used as final mode here -- e.g. staged 100755 plus
         # unstaged reversal reports `MM` and must resolve to worktree
         # 100644. An empty diff against a Y-diverged status is a race:
         # fail closed as unstable for the stability retry. A diff mode
         # outside the regular set against a regular lstat is the same
         # race (type changed under us).
-        worktree_mode = _worktree_diff_new_mode(root, path, deadline, tick)
+        if worktree_modes is not None:
+            worktree_mode = worktree_modes.get(path)
+        else:
+            worktree_mode = _worktree_diff_new_mode(root, path, deadline, tick)
         if worktree_mode is None:
             raise FinalizationError("FINAL_SNAPSHOT_UNSTABLE") from None
         if worktree_mode not in _REGULAR_BLOB_MODES:
