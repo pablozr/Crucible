@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import subprocess
 import uuid
@@ -105,6 +106,18 @@ def completion(project_id: str, root: Path, task_id: str) -> dict[str, object]:
 
 def database_path(tmp_path: Path) -> Path:
     return tmp_path / "data" / "crucible.db"
+
+
+def _sync_worktree_executable(path: Path) -> None:
+    # POSIX with core.filemode=true honors worktree exec bits via lstat:
+    # a staged `update-index --chmod=+x` alone leaves the worktree 644,
+    # so Git reports `MM`/dirty instead of the intended staged `M `.
+    # Mark the worktree executable where POSIX requires it so the final
+    # worktree matches the intended index mode; Windows keeps prior
+    # behavior (filemode=false ignores worktree bits).
+    if os.name != "nt":
+        mode = path.stat().st_mode
+        path.chmod(mode | 0o111)
 
 
 def admit(client: TestClient, project_id: str, root: Path) -> str:
@@ -342,6 +355,7 @@ def test_mode_only_structural_via_api(monkeypatch, tmp_path):
             ],
             check=True,
         )
+        _sync_worktree_executable(root / "tracked.txt")
         subprocess.run(
             ["git", "-C", str(root), "commit", "--quiet", "-m", "mode"],
             check=True,
@@ -608,12 +622,21 @@ def test_baseline_object_unavailable_only_when_genuinely_missing(tmp_path):
 
 
 def test_staged_symlink_real_capture_via_api(monkeypatch, tmp_path):
-    # Real staged symlink without FS privilege: worktree regular file
-    # carries the target string, index carries 120000 (`A `).
+    # Staged symlink (`A `) with an honest worktree: POSIX materializes a
+    # real symlink so index (120000) and worktree agree (staged-only);
+    # Windows keeps the regular-file simulation (no privilege needed),
+    # where staged-blob fallback supplies the link bytes.
     monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
     root = tmp_path / "repo"
     project_id = initialized_repository(root)
-    (root / "link.txt").write_text("tracked.txt", encoding="utf-8")
+    link_path = root / "link.txt"
+    if os.name != "nt":
+        try:
+            os.symlink("tracked.txt", link_path)
+        except OSError:
+            link_path.write_text("tracked.txt", encoding="utf-8")
+    else:
+        link_path.write_text("tracked.txt", encoding="utf-8")
     blob = (
         subprocess.run(
             ["git", "-C", str(root), "hash-object", "-w", "--stdin"],
@@ -678,6 +701,7 @@ def test_worktree_chmod_staged_not_committed_via_api(monkeypatch, tmp_path):
             ],
             check=True,
         )
+        _sync_worktree_executable(root / "tracked.txt")
         status = subprocess.run(
             [
                 "git",
@@ -806,6 +830,7 @@ def test_api_detail_returns_structural_metadata(monkeypatch, tmp_path):
             ],
             check=True,
         )
+        _sync_worktree_executable(root / "tracked.txt")
         response = client.post(
             "/v1/events", json=completion(project_id, root, task_id)
         )

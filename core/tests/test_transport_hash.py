@@ -3,9 +3,11 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import sqlite3
 import subprocess
 import uuid
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -68,6 +70,25 @@ def _post_raw(client, event):
         content=raw,
         headers={"Content-Type": "application/json"},
     ), raw
+
+
+def _lexical_variant(raw_root: str) -> str:
+    # Portable lexical spelling that pathlib canonicalizes on both OSes:
+    # Windows swaps separators; POSIX injects a redundant `//` inside
+    # the absolute path (never the leading `//`, which is impl-defined).
+    if os.name == "nt":
+        if "\\" in raw_root:
+            return raw_root.replace("\\", "/")
+        return raw_root.replace("/", "\\")
+    assert raw_root.startswith("/") and not raw_root.startswith("//")
+    idx = raw_root.find("/", 1)
+    if idx == -1:
+        variant = raw_root + "//"
+    else:
+        variant = raw_root[:idx] + "/" + raw_root[idx:]
+    assert variant != raw_root
+    assert Path(variant) == Path(raw_root)
+    return variant
 
 
 def test_cursor_rejects_non_list_shapes(monkeypatch, tmp_path):
@@ -196,12 +217,7 @@ def test_transport_replay_semantic_equality_reconciles(monkeypatch, tmp_path):
         replay_event = dict(event)
         replay_event["occurred_at"] = "2026-09-06T00:00:00.123+00:00"
         raw_root = str(root)
-        lexical_root = (
-            raw_root.replace("\\", "/")
-            if "\\" in raw_root
-            else raw_root.replace("/", "\\")
-        )
-        assert lexical_root != raw_root
+        lexical_root = _lexical_variant(raw_root)
         replay_event["git_root"] = lexical_root
         replay_event["workspace_path"] = lexical_root
 
@@ -267,12 +283,7 @@ def test_join_active_task_semantic_replay_reconciles(monkeypatch, tmp_path):
         replay = dict(join)
         replay["occurred_at"] = "2026-09-06T00:00:00.123+00:00"
         raw_root = str(root)
-        lexical_root = (
-            raw_root.replace("\\", "/")
-            if "\\" in raw_root
-            else raw_root.replace("/", "\\")
-        )
-        assert lexical_root != raw_root
+        lexical_root = _lexical_variant(raw_root)
         replay["git_root"] = lexical_root
         replay["workspace_path"] = lexical_root
         assert (
@@ -342,12 +353,7 @@ def test_terminal_abort_semantic_replay_reconciles(monkeypatch, tmp_path):
         replay = dict(abort)
         replay["occurred_at"] = "2026-09-07T00:01:00+00:00"
         raw_root = str(root)
-        lexical_root = (
-            raw_root.replace("\\", "/")
-            if "\\" in raw_root
-            else raw_root.replace("/", "\\")
-        )
-        assert lexical_root != raw_root
+        lexical_root = _lexical_variant(raw_root)
         replay["git_root"] = lexical_root
         replay["workspace_path"] = lexical_root
         legacy_first = canonical_json_sha256(
