@@ -174,7 +174,9 @@ jobs:
         working-directory: ${{ matrix.pkg }}
       - name: Smoke packed CLI + runtime
         # smoke-packed-install.mjs accepts --cli-tarball/--runtime-tarball;
-        # pnpm forwards them after `--`. Workspace install above guarantees
+        # args after the script name are forwarded to the script, so no extra
+        # `--` separator (it would reach node as a literal "--" argv entry and
+        # parseArgs would reject it). Workspace install above guarantees
         # dependency tarballs resolve for the offline fixture.
         shell: bash
         run: |
@@ -182,7 +184,7 @@ jobs:
           RUNTIME_TARBALL="$(ls dist-runtime/*.tgz | head -n 1)"
           echo "CLI: $CLI_TARBALL"
           echo "Runtime: $RUNTIME_TARBALL"
-          pnpm --filter @crucible/cli test:packed -- --cli-tarball "../../$CLI_TARBALL" --runtime-tarball "../../$RUNTIME_TARBALL"
+          pnpm --filter @crucible/cli test:packed --cli-tarball "../../$CLI_TARBALL" --runtime-tarball "../../$RUNTIME_TARBALL"
       - name: Upload runtime tarball
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # actions/upload-artifact 043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
