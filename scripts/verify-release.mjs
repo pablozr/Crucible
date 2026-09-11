@@ -472,7 +472,12 @@ if (tarballDir !== undefined) {
             fail(`${tarballDir}/SHA256SUMS: malformed line ${JSON.stringify(line)} (expected "<64 hex>  <filename>")`);
             continue;
           }
-          const [, recorded, name] = match;
+          const [, recorded, rawName] = match;
+          // `sha256sum ./*.tgz` (see package.yml) emits a benign `./` prefix
+          // (e.g. `./crucible-cli-0.1.0.tgz`). Strip exactly one leading `./`
+          // before comparison; anything else (nested paths, traversal,
+          // absolutes, repeated prefixes) still fails the expected-name check.
+          const name = rawName.startsWith("./") ? rawName.slice(2) : rawName;
           if (seen.has(name)) {
             fail(`${tarballDir}/SHA256SUMS: duplicate entry for ${JSON.stringify(name)}`);
             continue;
