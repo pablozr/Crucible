@@ -39,9 +39,10 @@ The goal is simple: make agent-written code easier to inspect, understand, and i
 > task lifecycle, event ingestion, Git baseline/final capture, and recovery.
 > A Task is one continuous execution interval containing one or more admitted
 > Inputs. Only exact OpenCode `1.18.28` is supported, as a restricted opt-in
-> profile; terminal ordering is not universal. There is no product dashboard
-> and no diagnostic UI is served (only `/v1` APIs), no CLI beyond `init`,
-> and no auto-packaged plugin.
+> profile; terminal ordering is not universal. The Core serves only `/v1` APIs
+> (no `/` route); the Angular dashboard runs separately with a `/v1` proxy to
+> the Core. The CLI provides `init`, `serve`, `dashboard`, and `status [--json]`.
+> There is no auto-packaged plugin.
 
 ## How it works
 
@@ -73,12 +74,16 @@ The design prioritizes reliable attribution: one active task per physical workin
 
 | Component | Available today | Planned next |
 | --- | --- | --- |
-| **CLI · TypeScript** | `init`: create and validate project identity and configuration | `serve`, `dashboard`, and `status` commands (not implemented) |
+| **CLI · TypeScript** | `init`, `serve`, `dashboard`, and `status [--json]` for project setup, local service control, and inspection | Final gate |
 | **Core · FastAPI** | Health/status API, SQLite migrations, project validation, `POST /v1/events`, `GET /v1/events/{event_id}`, task list/detail, admission, finalization, Git capture, and startup recovery | Performance/retention measurements and final gate |
 | **OpenCode adapter** | Dispatch adapter for exact OpenCode `1.18.28` only, with durable admission, steer/overlap handling, and opt-in live probes | Broader version/profile support only with new live proof |
-| **Dashboard** | Not served (no `/` route; only `/v1` APIs) | Read-only task history remains future work |
+| **Dashboard · Angular** | Separate app with a `/v1` proxy to the Core for read-only task history (not served by the Core) | Final gate |
 
 ## Getting started
+
+> **Prerelease.** `@crucible/cli` `0.1.0` is not published to npm yet. Once
+> published, install it with `npm install -g @crucible/cli`. Until then, use
+> the source development setup below.
 
 This is a **source development setup** for the current foundation. You will need Git, a recent Node.js version (22+ recommended), pnpm **10.33.2**, and Python **3.12+**.
 
@@ -107,7 +112,7 @@ This creates two files at the target repository's Git root:
 
 Initialization preserves an existing valid project ID and configuration. Files are created without being staged or committed. Initialization alone does not enable agent tracking.
 
-### 2. Start the local Core
+### 2. Start the local Core (separate terminals)
 
 From the repository root, create a Python environment:
 
@@ -122,21 +127,34 @@ Activate it using the command for your shell:
 | macOS / Linux (bash or zsh) | `source core/.venv/bin/activate` |
 | Windows (PowerShell) | `.\core\.venv\Scripts\Activate.ps1` |
 
-Install the Core and start the server:
+Install the Core (required before `serve`):
 
 ```sh
 python -m pip install -e "./core[dev]"
-crucible-core
 ```
 
-The server listens at **`http://127.0.0.1:7331`** and applies database migrations on startup.
+Keep that environment active in each terminal that runs the CLI service commands below. Then, from the repository root, use separate terminals:
+
+```sh
+# Terminal A — local service
+node packages/cli/dist/index.js serve
+
+# Terminal B — service inspection
+node packages/cli/dist/index.js status
+node packages/cli/dist/index.js status --json
+
+# Terminal C — dashboard (separate Angular app)
+node packages/cli/dist/index.js dashboard
+```
+
+`serve` requires `crucible-core` installed and the virtual environment active; it starts the same local service at **`http://127.0.0.1:7331`**. The dashboard is not served by the Core: it runs separately, depends on the workspace dependencies installed with `pnpm install`, and proxies `/v1` to the Core.
 
 | Endpoint | Purpose |
 | --- | --- |
 | [`GET /v1/health`](http://127.0.0.1:7331/v1/health) | Service health and version |
 | [`GET /v1/status`](http://127.0.0.1:7331/v1/status) | Database path, migration revision, and runtime status |
 
-The database uses your operating system's application-data directory by default. Set `CRUCIBLE_DATA_DIR` before starting the server to choose a different location. No dashboard or diagnostic UI is served (only `/v1` APIs).
+The database uses your operating system's application-data directory by default. Set `CRUCIBLE_DATA_DIR` before starting the server to choose a different location. The Core serves only `/v1` APIs.
 
 ## Development
 
@@ -171,8 +189,8 @@ python -m ruff format --check core
 - [x] Local Core with health/status endpoints and SQLite migrations.
 - [ ] Task lifecycle and reliable Git baseline/final-state capture.
 - [ ] OpenCode adapter with verified task boundaries.
-- [ ] Read-only dashboard for task history and diffs.
-- [ ] CLI commands for running and inspecting the local service.
+- [x] Read-only Angular dashboard for task history and diffs (separate app, not served by the Core).
+- [x] CLI commands (`init`, `serve`, `dashboard`, `status [--json]`) for running and inspecting the local service.
 
 Longer term, the project aims to support deterministic validation, optional AI reviews, correction tracking, and evidence-backed project rules. These are future directions, not current capabilities.
 
