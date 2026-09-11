@@ -1,0 +1,16 @@
+name: ci
+
+# PR + main validation. Invokes the reusable packaging pipeline.
+# No pull_request_target: forks run with read-only perms.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: package
+    uses: ./.github/workflows/package.yml

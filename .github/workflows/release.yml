@@ -1,0 +1,125 @@
+name: release
+
+# Tag release: build via package.yml, then publish to npm, then GitHub Release.
+# Nothing is executed/published locally; all publishing happens here in CI.
+#
+# First-time bootstrap note: npm trusted publishing (OIDC/provenance) requires
+# one manual bootstrap publish per package before `--provenance` works
+# (e.g. `npm publish <tarball> --access public` with a one-time token).
+# After that bootstrap, this workflow owns all later publishes; keep it intact.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    name: package
+    uses: ./.github/workflows/package.yml
+
+  validate-tag:
+    name: validate tag
+    needs: package
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout with tags
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout 3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          fetch-tags: true
+      - name: Strict tag + main ancestry + version match
+        shell: bash
+        run: |
+          TAG="${{ github.ref_name }}"
+          echo "Tag: $TAG"
+          if ! [[ "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Tag must be strict vX.Y.Z (no prerelease/build metadata)."
+            exit 1
+          fi
+          EXPECTED="${TAG#v}"
+          echo "Expected version: $EXPECTED"
+          git fetch origin main --tags
+          # Tag commit must be integrated into origin/main (tag commit is ancestor of main).
+          git merge-base --is-ancestor "${{ github.sha }}" origin/main
+          # Version script contract: repo versions must equal the tag version.
+          # (scripts/verify-release.mjs also enforces this on the tarballs.)
+          CLI_VER="$(node -p "require('./packages/cli/package.json').version")"
+          CORE_VER="$(python -c "import re;print(re.search(r'^VERSION\s*=\s*[\"\\']([^\"\\']+)[\"\\']', open('core/src/crucible_core/version.py').read(), re.M).group(1))")"
+          echo "cli=$CLI_VER core=$CORE_VER"
+          test "$CLI_VER" = "$EXPECTED"
+          test "$CORE_VER" = "$EXPECTED"
+
+  publish:
+    name: publish to npm
+    needs: [package, validate-tag]
+    runs-on: ubuntu-22.04
+    environment: npm-release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download aggregated tarballs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # actions/download-artifact 3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: release-tarballs
+          path: dist
+      - name: Setup pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # pnpm/action-setup ea17c68df8912ef543352723c149a84f56e3d413
+        with:
+          version: 10.33.2
+          run_install: false
+      - name: Setup Node (OIDC, no token)
+        # No cache: releases avoid cache. No NODE_AUTH_TOKEN: auth is OIDC.
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # actions/setup-node 820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24.12.0
+          registry-url: https://registry.npmjs.org
+      - name: List bundle (must be 5 tgz + checksum)
+        shell: bash
+        run: |
+          ls -la dist
+          cat dist/SHA256SUMS
+          test "$(ls dist/*.tgz | wc -l | tr -d ' ')" -eq 5
+      - name: Publish runtimes first
+        shell: bash
+        run: |
+          for f in dist/crucible-core-*.tgz; do
+            npm publish "$f" --access public --provenance
+          done
+      - name: Publish CLI last
+        shell: bash
+        run: |
+          for f in dist/crucible-cli-*.tgz; do
+            npm publish "$f" --access public --provenance
+          done
+
+  github-release:
+    name: github release
+    needs: publish
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download aggregated tarballs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # actions/download-artifact 3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: release-tarballs
+          path: dist
+      - name: Create GitHub Release and attach assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.ref_name }}"
+          ls -la dist
+          gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes dist/*.tgz dist/SHA256SUMS
