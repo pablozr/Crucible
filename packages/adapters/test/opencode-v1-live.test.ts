@@ -370,7 +370,7 @@ test("live 1.18.28 admission/steer/overlap transport probe", { skip: !LIVE }, as
       },
       {
         dispatch: async (context) => {
-          assert.equal(context.tracked, true);
+          assert.equal(context.tracked, true, JSON.stringify(context));
           assert.equal(context.eventId, eventA);
 
           const event = await lookupEvent(eventA);
@@ -420,7 +420,7 @@ test("live 1.18.28 admission/steer/overlap transport probe", { skip: !LIVE }, as
     const steered = await dispatchOpenCodeV1(
       {
         openCodeVersion: SUPPORTED,
-        executionId: inputS,
+        executionId: inputA,
         agentSessionId: agentSession,
         messageId: inputS,
         workspacePath: repo,
@@ -429,7 +429,7 @@ test("live 1.18.28 admission/steer/overlap transport probe", { skip: !LIVE }, as
       },
       {
         dispatch: async (context) => {
-          assert.equal(context.tracked, true);
+          assert.equal(context.tracked, true, JSON.stringify(context));
           assert.equal(context.eventId, eventS);
           assert.equal(context.taskId, taskId);
 
