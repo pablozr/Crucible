@@ -106,7 +106,9 @@ test(
 
     const corePort = await freePort();
     const coreUrl = `http://127.0.0.1:${corePort}`;
-    core = spawn("python", ["-m", "uvicorn", "crucible_core.main:app", "--host", "127.0.0.1", "--port", String(corePort)], {
+    const rawCorePython = process.env.CRUCIBLE_CORE_PYTHON;
+    const corePython = rawCorePython !== undefined && rawCorePython.trim().length > 0 ? rawCorePython : "python";
+    core = spawn(corePython, ["-m", "uvicorn", "crucible_core.main:app", "--host", "127.0.0.1", "--port", String(corePort)], {
       cwd: join(repoRoot, "core"),
       env: {
         ...process.env,
@@ -118,10 +120,6 @@ test(
     });
     await waitForHealth(`${coreUrl}/v1/health`, STARTUP_TIMEOUT_MS);
 
-    const corePython =
-      process.platform === "win32"
-        ? join(repoRoot, "core", ".venv", "Scripts", "python.exe")
-        : join(repoRoot, "core", ".venv", "bin", "python");
     const pythonLegacyHash = (envelope: string): string =>
       execFileSync(corePython, ["-c", LEGACY_HASH_SCRIPT], {
         input: envelope,
