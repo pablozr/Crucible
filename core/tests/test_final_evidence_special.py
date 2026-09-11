@@ -629,38 +629,38 @@ def test_staged_symlink_real_capture_via_api(monkeypatch, tmp_path):
     monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "data"))
     root = tmp_path / "repo"
     project_id = initialized_repository(root)
-    link_path = root / "link.txt"
-    if os.name != "nt":
-        try:
-            os.symlink("tracked.txt", link_path)
-        except OSError:
-            link_path.write_text("tracked.txt", encoding="utf-8")
-    else:
-        link_path.write_text("tracked.txt", encoding="utf-8")
-    blob = (
-        subprocess.run(
-            ["git", "-C", str(root), "hash-object", "-w", "--stdin"],
-            input=b"tracked.txt",
-            capture_output=True,
-            check=True,
-        )
-        .stdout.decode()
-        .strip()
-    )
-    subprocess.run(
-        [
-            "git",
-            "-C",
-            str(root),
-            "update-index",
-            "--add",
-            "--cacheinfo",
-            f"120000,{blob},link.txt",
-        ],
-        check=True,
-    )
     with TestClient(app) as client:
         task_id = admit(client, project_id, root)
+        link_path = root / "link.txt"
+        if os.name != "nt":
+            try:
+                os.symlink("tracked.txt", link_path)
+            except OSError:
+                link_path.write_text("tracked.txt", encoding="utf-8")
+        else:
+            link_path.write_text("tracked.txt", encoding="utf-8")
+        blob = (
+            subprocess.run(
+                ["git", "-C", str(root), "hash-object", "-w", "--stdin"],
+                input=b"tracked.txt",
+                capture_output=True,
+                check=True,
+            )
+            .stdout.decode()
+            .strip()
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(root),
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                f"120000,{blob},link.txt",
+            ],
+            check=True,
+        )
         response = client.post(
             "/v1/events", json=completion(project_id, root, task_id)
         )
